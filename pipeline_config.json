@@ -1,0 +1,7 @@
+{
+  "uniprot_id": "P04637",
+  "gene_symbol": "TP53",
+  "clinvar_esearch_term": "TP53[gene]",
+  "output_basename": "tp53",
+  "alphafold_fragment": "F1"
+}
