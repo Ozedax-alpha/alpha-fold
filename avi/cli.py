@@ -40,6 +40,7 @@ _PRESETS: dict[str, dict[str, str]] = {
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS = BASE_DIR / "scripts"
+NOTEBOOK_PATH = BASE_DIR / "notebooks" / "01_tp53_exploration.ipynb"
 
 
 def _run_script(name: str, extra: list[str], *, env: dict[str, str] | None = None) -> int:
@@ -89,6 +90,34 @@ def _pipeline_env_for_run_dir(run_dir: Path) -> dict[str, str]:
     env["PIPELINE_CONFIG_PATH"] = str(cfg.resolve())
     env["PIPELINE_OUTPUT_DIR"] = str(data_root.resolve())
     return env
+
+
+def _run_module(module: str, args: list[str], *, env: dict[str, str] | None) -> int:
+    cmd = [sys.executable, "-m", module, *args]
+    print("+", " ".join(cmd))
+    return subprocess.call(cmd, cwd=BASE_DIR, env=env)
+
+
+def _export_html_report(*, run_dir: Path, env: dict[str, str]) -> int:
+    out_dir = run_dir / "reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not NOTEBOOK_PATH.is_file():
+        raise SystemExit(f"Missing notebook: {NOTEBOOK_PATH}")
+    return _run_module(
+        "jupyter",
+        [
+            "nbconvert",
+            "--to",
+            "html",
+            "--execute",
+            str(NOTEBOOK_PATH),
+            "--output",
+            "exploration_report",
+            "--output-dir",
+            str(out_dir),
+        ],
+        env=env,
+    )
 
 
 def cmd_init(ns: argparse.Namespace) -> int:
@@ -166,7 +195,9 @@ def cmd_run(ns: argparse.Namespace) -> int:
             elif s == "subset":
                 rc = _run_script("build_missense_subset.py", [], env=env)
             elif s == "report":
-                rc = _run_script("export_report.py", [], env=env)
+                if run_dir is None or env is None:
+                    raise SystemExit("Stage 'report' requires --run-dir.")
+                rc = _export_html_report(run_dir=run_dir, env=env)
             elif s == "repro":
                 rc = _run_script("repro_manifest.py", ["--trail"], env=env)
             if rc != 0:
@@ -277,6 +308,28 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_notebook(ns: argparse.Namespace) -> int:
+    run_dir = Path(ns.run_dir)
+    if not run_dir.is_absolute():
+        run_dir = (BASE_DIR / run_dir).resolve()
+    env = _pipeline_env_for_run_dir(run_dir)
+    # Start server at repo root so users can browse notebooks/; do not pass a
+    # notebook path here (avoids root-path confusion/404s).
+    return _run_module(
+        "jupyter",
+        ["notebook", "--notebook-dir", str(BASE_DIR)],
+        env=env,
+    )
+
+
+def cmd_report(ns: argparse.Namespace) -> int:
+    run_dir = Path(ns.run_dir)
+    if not run_dir.is_absolute():
+        run_dir = (BASE_DIR / run_dir).resolve()
+    env = _pipeline_env_for_run_dir(run_dir)
+    return _export_html_report(run_dir=run_dir, env=env)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="avi",
@@ -360,6 +413,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preflight checks (imports, config JSON, writable dirs).",
     )
     p_doc.set_defaults(func=cmd_doctor)
+
+    p_nb = sub.add_parser(
+        "notebook",
+        help="Launch Jupyter Notebook with this run's env vars set.",
+    )
+    p_nb.add_argument(
+        "--run-dir",
+        required=True,
+        help="Run directory containing pipeline_config.json (sets PIPELINE_* env vars).",
+    )
+    p_nb.set_defaults(func=cmd_notebook)
+
+    p_rep = sub.add_parser(
+        "report",
+        help="Execute the notebook and write an HTML report under <run-dir>/reports/.",
+    )
+    p_rep.add_argument(
+        "--run-dir",
+        required=True,
+        help="Run directory containing pipeline_config.json (sets PIPELINE_* env vars).",
+    )
+    p_rep.set_defaults(func=cmd_report)
 
     return p
 
