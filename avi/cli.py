@@ -356,16 +356,18 @@ def cmd_init(ns: argparse.Namespace) -> int:
         uid = str(ns.from_uniprot or "").strip()
         if not uid:
             raise SystemExit("Specify --preset or --from-uniprot.")
-        gene = _fetch_uniprot_gene_symbol(uid) or ""
+        gene = str(ns.gene_symbol or "").strip() or (_fetch_uniprot_gene_symbol(uid) or "")
         if not gene:
             raise SystemExit(f"Could not resolve gene symbol for {uid}.")
-        base = _slugify_basename(gene)
+        base = str(ns.output_basename or "").strip() or _slugify_basename(gene)
+        frag = str(ns.alphafold_fragment or "F1").strip()
+        term = str(ns.clinvar_esearch_term or f"{gene}[gene]").strip()
         cfg_preview = {
             "uniprot_id": uid,
             "gene_symbol": gene,
-            "clinvar_esearch_term": f"{gene}[gene]",
+            "clinvar_esearch_term": term,
             "output_basename": base,
-            "alphafold_fragment": "F1",
+            "alphafold_fragment": frag,
         }
         run_key = str(ns.key or base)
     basename = cfg_preview.get("output_basename", "").strip() or run_key
@@ -805,6 +807,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--key",
         default=None,
         help="Optional label used for defaults when using --from-uniprot.",
+    )
+    p_init.add_argument(
+        "--gene-symbol",
+        default=None,
+        help="With --from-uniprot: override the resolved gene symbol.",
+    )
+    p_init.add_argument(
+        "--output-basename",
+        default=None,
+        help="With --from-uniprot: override output basename directory/file prefix.",
+    )
+    p_init.add_argument(
+        "--clinvar-esearch-term",
+        default=None,
+        help="With --from-uniprot: override ClinVar esearch term.",
+    )
+    p_init.add_argument(
+        "--alphafold-fragment",
+        default=None,
+        help="With --from-uniprot: override AlphaFold fragment (usually F1).",
     )
     p_init.add_argument(
         "--run",
