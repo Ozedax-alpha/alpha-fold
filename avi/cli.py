@@ -230,6 +230,45 @@ def _report_html_path(run_dir: Path) -> Path:
     return run_dir / "reports" / "exploration_report.html"
 
 
+def _run_state_path(run_dir: Path) -> Path:
+    return run_dir / "run_state.json"
+
+
+def _load_run_state(run_dir: Path) -> dict[str, Any]:
+    p = _run_state_path(run_dir)
+    if not p.is_file():
+        return {"stages": {}}
+    try:
+        doc: Any = json.loads(p.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {"stages": {}}
+    if not isinstance(doc, dict):
+        return {"stages": {}}
+    if "stages" not in doc or not isinstance(doc.get("stages"), dict):
+        doc["stages"] = {}
+    return doc
+
+
+def _save_run_state(run_dir: Path, state: dict[str, Any]) -> None:
+    _atomic_write_text(_run_state_path(run_dir), json.dumps(state, indent=2, ensure_ascii=False) + "\n")
+
+
+def _artifact_done_for_stage(stage: str, *, run_dir: Path, cfg: dict[str, Any]) -> bool:
+    data_root = run_dir / "data"
+    art = artifact_paths(cfg, data_root)
+    if stage == "download":
+        return art["alphafold_pdb"].is_file() and art["clinvar_json"].is_file()
+    if stage == "variants":
+        return art["variants_basic_csv"].is_file()
+    if stage == "subset":
+        return art["missense_mappable_csv"].is_file()
+    if stage == "report":
+        return _report_html_path(run_dir).is_file()
+    if stage == "repro":
+        return art["repro_manifest"].is_file()
+    return False
+
+
 def _runs_root() -> Path:
     return BASE_DIR / "runs"
 
@@ -440,7 +479,9 @@ def cmd_run(ns: argparse.Namespace) -> int:
     started = time.time()
     rc = 0
 
-    if not stages:
+    # Default behavior stays aligned with scripts/run_pipeline.py unless --resume
+    # is requested (resume always runs step-by-step).
+    if not stages and not getattr(ns, "resume", False):
         extra: list[str] = []
         if ns.force_download:
             extra.append("--force-download")
@@ -450,17 +491,54 @@ def cmd_run(ns: argparse.Namespace) -> int:
     else:
         order = ["download", "variants", "subset", "report", "repro"]
         wanted: list[str] = []
-        for s in stages:
-            if s not in order:
-                raise SystemExit(
-                    f"Unknown stage {s!r}. Choose from: {', '.join(order)}"
-                )
-            if s not in wanted:
-                wanted.append(s)
+        if stages:
+            for s in stages:
+                if s not in order:
+                    raise SystemExit(
+                        f"Unknown stage {s!r}. Choose from: {', '.join(order)}"
+                    )
+                if s not in wanted:
+                    wanted.append(s)
+        else:
+            wanted = ["download", "variants"]
+            if not ns.no_subset:
+                wanted.append("subset")
+
+        cfg: dict[str, Any] | None = None
+        state: dict[str, Any] | None = None
+        if run_dir is not None:
+            cfg_path = run_dir / "pipeline_config.json"
+            if cfg_path.is_file():
+                cfg = _load_json(cfg_path)
+            state = _load_run_state(run_dir)
 
         for s in order:
             if s not in wanted:
                 continue
+            if getattr(ns, "resume", False) and run_dir is not None and cfg is not None:
+                if _artifact_done_for_stage(s, run_dir=run_dir, cfg=cfg):
+                    if state is not None:
+                        stages_state = state.setdefault("stages", {})
+                        if isinstance(stages_state, dict):
+                            stages_state[str(s)] = {
+                                "skipped": True,
+                                "reason": "already complete",
+                                "finished_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
+                                "return_code": 0,
+                            }
+                            _save_run_state(run_dir, state)
+                    print(f"= Skipping stage {s!r} (already complete)")
+                    rc = 0
+                    continue
+
+            if state is not None:
+                stages_state = state.setdefault("stages", {})
+                if isinstance(stages_state, dict):
+                    stages_state[str(s)] = {
+                        "started_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
+                    }
+                    _save_run_state(run_dir, state)
+
             if s == "download":
                 dl = ["--force"] if ns.force_download else []
                 rc = _run_script("download_tp53_data.py", dl, env=env)
@@ -473,7 +551,28 @@ def cmd_run(ns: argparse.Namespace) -> int:
                     raise SystemExit("Stage 'report' requires --run-dir.")
                 rc = _export_html_report(run_dir=run_dir, env=env)
             elif s == "repro":
-                rc = _run_script("repro_manifest.py", ["--trail"], env=env)
+                if run_dir is None:
+                    raise SystemExit("Stage 'repro' requires --run-dir.")
+                try:
+                    out = _write_run_manifest(run_dir=run_dir)
+                    print(f"Wrote {out}")
+                    rc = 0
+                except Exception as e:
+                    print(f"Manifest error: {e}", file=sys.stderr)
+                    rc = 1
+
+            if state is not None:
+                stages_state = state.setdefault("stages", {})
+                if isinstance(stages_state, dict):
+                    prev = stages_state.get(str(s)) if isinstance(stages_state.get(str(s)), dict) else {}
+                    prev.update(
+                        {
+                            "finished_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
+                            "return_code": int(rc),
+                        }
+                    )
+                    stages_state[str(s)] = prev
+                    _save_run_state(run_dir, state)
             if rc != 0:
                 break
 
@@ -500,8 +599,16 @@ def cmd_run(ns: argparse.Namespace) -> int:
         )
         if rc == 0 and not getattr(ns, "no_manifest", False):
             try:
-                out = _write_run_manifest(run_dir=run_dir)
-                print(f"Wrote {out}")
+                # If --resume, avoid rewriting a manifest that's already present.
+                cfg_path = run_dir / "pipeline_config.json"
+                cfg = _load_json(cfg_path) if cfg_path.is_file() else {}
+                art = artifact_paths(cfg, run_dir / "data") if isinstance(cfg, dict) else {}
+                existing = art.get("repro_manifest") if isinstance(art, dict) else None
+                if getattr(ns, "resume", False) and isinstance(existing, Path) and existing.is_file():
+                    print(f"= Repro manifest already present: {existing.name}")
+                else:
+                    out = _write_run_manifest(run_dir=run_dir)
+                    print(f"Wrote {out}")
             except Exception as e:
                 print(f"Manifest error: {e}", file=sys.stderr)
 
@@ -909,6 +1016,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--force-download",
         action="store_true",
         help="Force refresh of raw AlphaFold / ClinVar downloads.",
+    )
+    p_run.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume a run by skipping stages whose outputs already exist (writes run_state.json).",
     )
     p_run.add_argument(
         "--no-subset",
