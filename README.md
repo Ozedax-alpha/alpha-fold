@@ -2,6 +2,21 @@
 
 Small research scaffold: download human **TP53** (UniProt `P04637`) from AlphaFold DB, pull **ClinVar** records for the gene via NCBI E-utilities, and produce a tidy table of variant fields plus protein-position checks against the PDB.
 
+## Recommended UX: one front door (`avi`)
+
+Run everything via the CLI:
+
+```bash
+py -3 -m avi doctor
+py -3 -m avi init --preset tp53
+py -3 -m avi run --run-dir runs/tp53/<timestamp>
+py -3 -m avi explain --run-dir runs/tp53/<timestamp>
+```
+
+Notes:
+- `avi init` creates a timestamped run directory under `runs/` containing `pipeline_config.json`.
+- `avi run --run-dir ...` writes outputs to `<run-dir>/data/{raw,processed}/` via `PIPELINE_CONFIG_PATH` / `PIPELINE_OUTPUT_DIR`.
+
 ## Layout
 
 - `data/raw/` — AlphaFold PDB and ClinVar JSON from the download script
