@@ -345,8 +345,26 @@ def cmd_add_preset(ns: argparse.Namespace) -> int:
 
 def cmd_init(ns: argparse.Namespace) -> int:
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-    cfg_preview = _preset_config(ns.preset)
-    basename = cfg_preview.get("output_basename", "").strip() or ns.preset
+    if ns.preset:
+        cfg_preview = _preset_config(ns.preset)
+        run_key = str(ns.preset)
+    else:
+        uid = str(ns.from_uniprot or "").strip()
+        if not uid:
+            raise SystemExit("Specify --preset or --from-uniprot.")
+        gene = _fetch_uniprot_gene_symbol(uid) or ""
+        if not gene:
+            raise SystemExit(f"Could not resolve gene symbol for {uid}.")
+        base = _slugify_basename(gene)
+        cfg_preview = {
+            "uniprot_id": uid,
+            "gene_symbol": gene,
+            "clinvar_esearch_term": f"{gene}[gene]",
+            "output_basename": base,
+            "alphafold_fragment": "F1",
+        }
+        run_key = str(ns.key or base)
+    basename = cfg_preview.get("output_basename", "").strip() or run_key
     safe = basename.replace("/", "_").replace("\\", "_")
 
     runs_parent = Path(ns.runs_parent)
@@ -718,13 +736,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_init = sub.add_parser(
         "init",
-        help="Create a timestamped run dir + pipeline_config.json from a preset.",
+        help="Create a timestamped run dir + pipeline_config.json.",
     )
-    p_init.add_argument(
+    src = p_init.add_mutually_exclusive_group(required=True)
+    src.add_argument(
         "--preset",
-        required=True,
         metavar="NAME",
         help="Preset name from avi/presets.json (edit this file to add targets).",
+    )
+    src.add_argument(
+        "--from-uniprot",
+        metavar="ACC",
+        help="Create a one-off run by fetching gene symbol from UniProt (e.g. P38398).",
+    )
+    p_init.add_argument(
+        "--key",
+        default=None,
+        help="Optional label used for defaults when using --from-uniprot.",
     )
     p_init.add_argument(
         "--runs-parent",
