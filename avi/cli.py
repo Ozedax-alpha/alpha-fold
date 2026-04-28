@@ -11,11 +11,17 @@ import time
 import webbrowser
 import hashlib
 import shutil
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from avi.paths import artifact_paths, default_config_path, format_paths_summary
+
+try:
+    import requests  # type: ignore
+except Exception:  # pragma: no cover
+    requests = None  # type: ignore
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS = BASE_DIR / "scripts"
@@ -62,6 +68,38 @@ def _atomic_write_text(path: Path, text: str) -> None:
 def _save_presets(presets: dict[str, dict[str, Any]]) -> None:
     blob = json.dumps(presets, indent=2, ensure_ascii=False) + "\n"
     _atomic_write_text(PRESETS_PATH, blob)
+
+
+def _slugify_basename(s: str) -> str:
+    t = (s or "").strip().lower()
+    t = re.sub(r"\s+", "_", t)
+    t = re.sub(r"[^a-z0-9_]+", "", t)
+    return t or "output"
+
+
+def _fetch_uniprot_gene_symbol(uniprot_id: str) -> str | None:
+    """Return primary gene symbol for a UniProt accession, if available."""
+    if requests is None:
+        raise SystemExit("Missing dependency: requests (install requirements.txt).")
+    uid = str(uniprot_id).strip()
+    if not uid:
+        return None
+    url = f"https://rest.uniprot.org/uniprotkb/{uid}.json"
+    r = requests.get(url, timeout=30)
+    if r.status_code == 404:
+        raise SystemExit(f"UniProt accession not found: {uid}")
+    r.raise_for_status()
+    doc = r.json()
+    genes = doc.get("genes") if isinstance(doc, dict) else None
+    if not isinstance(genes, list):
+        return None
+    for g in genes:
+        if not isinstance(g, dict):
+            continue
+        gn = g.get("geneName")
+        if isinstance(gn, dict) and isinstance(gn.get("value"), str) and gn["value"].strip():
+            return gn["value"].strip()
+    return None
 
 
 def _preset_config(preset: str) -> dict[str, str]:
@@ -265,19 +303,29 @@ def cmd_add_preset(ns: argparse.Namespace) -> int:
 
     def ask(prompt: str, default: str | None = None) -> str:
         if ns.non_interactive:
-            assert default is not None
-            return default
+            if default is None or not str(default).strip():
+                raise SystemExit(
+                    f"Missing required field for non-interactive mode: {prompt}"
+                )
+            return str(default)
         suffix = f" [{default}]" if default else ""
         v = input(f"{prompt}{suffix}: ").strip()
         return v or (default or "")
 
-    uniprot_id = ns.uniprot_id or ask("UniProt accession", None if ns.non_interactive else "")
-    gene_symbol = ns.gene_symbol or ask("Gene symbol", None if ns.non_interactive else "")
+    from_uid = str(ns.from_uniprot).strip() if ns.from_uniprot else ""
+    auto_gene = None
+    if from_uid:
+        auto_gene = _fetch_uniprot_gene_symbol(from_uid)
+
+    uniprot_id = ns.uniprot_id or from_uid or ask("UniProt accession", None)
+    gene_symbol = ns.gene_symbol or auto_gene or ask("Gene symbol", None)
+    default_term = f"{gene_symbol}[gene]" if gene_symbol else None
     clinvar_term = ns.clinvar_esearch_term or ask(
-        "ClinVar esearch term (e.g. TP53[gene])", None if ns.non_interactive else ""
+        "ClinVar esearch term (e.g. TP53[gene])", default_term
     )
-    output_basename = ns.output_basename or ask("Output basename (e.g. tp53)", None if ns.non_interactive else key)
-    alphafold_fragment = ns.alphafold_fragment or ask("AlphaFold fragment (usually F1)", None if ns.non_interactive else "F1")
+    default_base = _slugify_basename(gene_symbol) if gene_symbol else key
+    output_basename = ns.output_basename or ask("Output basename (e.g. tp53)", default_base)
+    alphafold_fragment = ns.alphafold_fragment or ask("AlphaFold fragment (usually F1)", "F1")
 
     entry = {
         "uniprot_id": str(uniprot_id).strip(),
@@ -551,11 +599,11 @@ def cmd_batch(ns: argparse.Namespace) -> int:
     if missing:
         raise SystemExit(f"Unknown preset(s): {', '.join(missing)}")
 
-    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    batch_ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     runs_parent = Path(ns.runs_parent)
     if not runs_parent.is_absolute():
         runs_parent = BASE_DIR / runs_parent
-    batch_out = runs_parent / f"batch_status_{ts}.json"
+    batch_out = runs_parent / f"batch_status_{batch_ts}.json"
 
     status: dict[str, Any] = {
         "started_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
@@ -564,11 +612,14 @@ def cmd_batch(ns: argparse.Namespace) -> int:
         "results": [],
     }
 
-    for key in wanted:
+    for idx, key in enumerate(wanted):
+        run_ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         cfg_preview = _preset_config(key)
         basename = cfg_preview.get("output_basename", "").strip() or key
         safe = basename.replace("/", "_").replace("\\", "_")
-        run_dir = runs_parent / safe / ts
+        # Ensure unique run timestamps (batch can run faster than 1/sec).
+        suffix = f"_{idx:03d}"
+        run_dir = runs_parent / safe / f"{run_ts}{suffix}"
         run_dir.mkdir(parents=True, exist_ok=True)
         _write_config(cfg_preview, run_dir / "pipeline_config.json")
         (run_dir / "run.json").write_text(
@@ -687,6 +738,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Add or update a preset in avi/presets.json.",
     )
     p_add.add_argument("key", help="Preset key (e.g. brca1, mygene).")
+    p_add.add_argument(
+        "--from-uniprot",
+        default=None,
+        help="Fetch gene symbol from UniProt and use it to prefill fields.",
+    )
     p_add.add_argument("--uniprot-id", dest="uniprot_id", default=None)
     p_add.add_argument("--gene-symbol", dest="gene_symbol", default=None)
     p_add.add_argument("--clinvar-esearch-term", dest="clinvar_esearch_term", default=None)
