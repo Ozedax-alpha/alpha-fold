@@ -8,6 +8,7 @@ stable for programmatic ClinVar access.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import time
@@ -144,6 +145,22 @@ def download_clinvar_tp53() -> None:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="Redownload even if raw files already exist (overwrites PDB/ClinVar JSON).",
+    )
+    args = ap.parse_args()
+
+    if args.force:
+        if AFDB_OUT.exists():
+            AFDB_OUT.unlink()
+            print(f"Removed existing {AFDB_OUT} (--force)")
+        if CLINVAR_OUT.exists():
+            CLINVAR_OUT.unlink()
+            print(f"Removed existing {CLINVAR_OUT} (--force)")
+
     download_alphafold_structure()
     download_clinvar_tp53()
     print("Done.")
