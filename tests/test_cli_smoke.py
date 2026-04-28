@@ -32,6 +32,9 @@ def test_avi_help():
 def test_avi_init_help():
     _run_help(["-m", "avi", "init", "--help"])
 
+def test_avi_add_preset_help():
+    _run_help(["-m", "avi", "add-preset", "--help"])
+
 def test_avi_run_help():
     _run_help(["-m", "avi", "run", "--help"])
 
@@ -40,6 +43,12 @@ def test_avi_explain_help():
 
 def test_avi_doctor_help():
     _run_help(["-m", "avi", "doctor", "--help"])
+
+def test_avi_repro_help():
+    _run_help(["-m", "avi", "repro", "--help"])
+
+def test_avi_clean_help():
+    _run_help(["-m", "avi", "clean", "--help"])
 
 def test_avi_batch_help():
     _run_help(["-m", "avi", "batch", "--help"])

@@ -9,6 +9,8 @@ import subprocess
 import sys
 import time
 import webbrowser
+import hashlib
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -34,18 +36,39 @@ def _load_json(path: Path) -> dict[str, Any]:
     return doc
 
 
-def _preset_config(preset: str) -> dict[str, str]:
-    key = str(preset).strip()
-    if not key:
-        raise SystemExit("Empty preset name.")
+def _load_presets() -> dict[str, dict[str, Any]]:
     if not PRESETS_PATH.is_file():
-        raise SystemExit(f"Missing presets file: {PRESETS_PATH}")
+        return {}
     try:
         doc = json.loads(PRESETS_PATH.read_text(encoding="utf-8-sig"))
     except Exception as e:
         raise SystemExit(f"Failed to read {PRESETS_PATH}: {e}")
     if not isinstance(doc, dict):
         raise SystemExit(f"{PRESETS_PATH} must be a JSON object.")
+    out: dict[str, dict[str, Any]] = {}
+    for k, v in doc.items():
+        if isinstance(k, str) and isinstance(v, dict):
+            out[k] = dict(v)
+    return out
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _save_presets(presets: dict[str, dict[str, Any]]) -> None:
+    blob = json.dumps(presets, indent=2, ensure_ascii=False) + "\n"
+    _atomic_write_text(PRESETS_PATH, blob)
+
+
+def _preset_config(preset: str) -> dict[str, str]:
+    key = str(preset).strip()
+    if not key:
+        raise SystemExit("Empty preset name.")
+    doc = _load_presets()
     entry = doc.get(key)
     if not isinstance(entry, dict):
         avail = ", ".join(sorted(doc))
@@ -90,6 +113,51 @@ def _pipeline_env_for_run_dir(run_dir: Path) -> dict[str, str]:
     env["PIPELINE_CONFIG_PATH"] = str(cfg.resolve())
     env["PIPELINE_OUTPUT_DIR"] = str(data_root.resolve())
     return env
+
+
+def _sha256_file(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_run_manifest(*, run_dir: Path) -> Path:
+    cfg_path = run_dir / "pipeline_config.json"
+    if not cfg_path.is_file():
+        raise SystemExit(f"Missing config: {cfg_path}")
+    cfg = _load_json(cfg_path)
+    base = str(cfg.get("output_basename") or "run").replace("/", "_").replace("\\", "_")
+    data_root = run_dir / "data"
+    raw = data_root / "raw"
+    proc = data_root / "processed"
+    proc.mkdir(parents=True, exist_ok=True)
+    art = artifact_paths(cfg, data_root)
+
+    doc = {
+        "generated_at_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
+        "run_dir": str(run_dir.resolve()),
+        "pipeline_config": str(cfg_path.resolve()),
+        "config_effective": cfg,
+        "raw_files": [
+            {
+                "path": str(art["alphafold_pdb"]),
+                "exists": art["alphafold_pdb"].is_file(),
+                "sha256": _sha256_file(art["alphafold_pdb"]),
+            },
+            {
+                "path": str(art["clinvar_json"]),
+                "exists": art["clinvar_json"].is_file(),
+                "sha256": _sha256_file(art["clinvar_json"]),
+            },
+        ],
+    }
+    out = proc / f"repro_manifest_{base}.json"
+    out.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return out
 
 
 def _run_module(module: str, args: list[str], *, env: dict[str, str] | None) -> int:
@@ -181,6 +249,50 @@ def cmd_list_runs(ns: argparse.Namespace) -> int:
                 pass
         rel = rd.relative_to(BASE_DIR) if rd.is_absolute() else rd
         print(f"{rel}  basename={vb or '?'}  processed={{basic:{vb_ok},subset:{mm}}}  last_rc={last_rc}")
+    return 0
+
+
+def cmd_add_preset(ns: argparse.Namespace) -> int:
+    presets = _load_presets()
+
+    key = str(ns.key).strip()
+    if not key:
+        raise SystemExit("Preset key is required.")
+
+    overwrite = bool(ns.overwrite)
+    if key in presets and not overwrite:
+        raise SystemExit(f"Preset {key!r} already exists. Use --overwrite to replace.")
+
+    def ask(prompt: str, default: str | None = None) -> str:
+        if ns.non_interactive:
+            assert default is not None
+            return default
+        suffix = f" [{default}]" if default else ""
+        v = input(f"{prompt}{suffix}: ").strip()
+        return v or (default or "")
+
+    uniprot_id = ns.uniprot_id or ask("UniProt accession", None if ns.non_interactive else "")
+    gene_symbol = ns.gene_symbol or ask("Gene symbol", None if ns.non_interactive else "")
+    clinvar_term = ns.clinvar_esearch_term or ask(
+        "ClinVar esearch term (e.g. TP53[gene])", None if ns.non_interactive else ""
+    )
+    output_basename = ns.output_basename or ask("Output basename (e.g. tp53)", None if ns.non_interactive else key)
+    alphafold_fragment = ns.alphafold_fragment or ask("AlphaFold fragment (usually F1)", None if ns.non_interactive else "F1")
+
+    entry = {
+        "uniprot_id": str(uniprot_id).strip(),
+        "gene_symbol": str(gene_symbol).strip(),
+        "clinvar_esearch_term": str(clinvar_term).strip(),
+        "output_basename": str(output_basename).strip(),
+        "alphafold_fragment": str(alphafold_fragment).strip(),
+    }
+    missing = [k for k, v in entry.items() if not v]
+    if missing:
+        raise SystemExit(f"Missing fields: {', '.join(missing)}")
+
+    presets[key] = entry
+    _save_presets(presets)
+    print(f"Wrote preset {key!r} to {PRESETS_PATH}")
     return 0
 
 def cmd_init(ns: argparse.Namespace) -> int:
@@ -293,6 +405,12 @@ def cmd_run(ns: argparse.Namespace) -> int:
             json.dumps(prior, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+        if rc == 0 and not getattr(ns, "no_manifest", False):
+            try:
+                out = _write_run_manifest(run_dir=run_dir)
+                print(f"Wrote {out}")
+            except Exception as e:
+                print(f"Manifest error: {e}", file=sys.stderr)
 
     return rc
 
@@ -374,7 +492,135 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         ok = False
         print(f"  writable runs/: FAILED ({e})")
 
+    # Jupyter availability
+    try:
+        __import__("jupyter")
+        print("  jupyter: ok (python -m jupyter ...)")
+    except ImportError:
+        print("  jupyter: missing (install requirements.txt)")
+
     return 0 if ok else 1
+
+
+def cmd_repro(ns: argparse.Namespace) -> int:
+    run_dir = Path(ns.run_dir)
+    if not run_dir.is_absolute():
+        run_dir = (BASE_DIR / run_dir).resolve()
+    out = _write_run_manifest(run_dir=run_dir)
+    print(f"Wrote {out}")
+    return 0
+
+
+def cmd_clean(ns: argparse.Namespace) -> int:
+    runs_root = Path(ns.runs_root) if ns.runs_root else _runs_root()
+    if not runs_root.is_absolute():
+        runs_root = (BASE_DIR / runs_root).resolve()
+    keep = int(ns.keep)
+    dry = not bool(ns.yes)
+
+    runs = _iter_run_dirs(runs_root)
+    victims = runs[keep:]
+    if not victims:
+        print("Nothing to clean.")
+        return 0
+
+    for rd in victims:
+        rel = rd.relative_to(BASE_DIR) if rd.is_absolute() else rd
+        if dry:
+            print(f"DRY-RUN delete: {rel}")
+        else:
+            shutil.rmtree(rd)
+            print(f"Deleted: {rel}")
+    if dry:
+        print("Dry run only. Re-run with --yes to delete.")
+    return 0
+
+
+def cmd_batch(ns: argparse.Namespace) -> int:
+    presets = _load_presets()
+    if not presets:
+        raise SystemExit(f"No presets found in {PRESETS_PATH}")
+
+    if ns.presets:
+        wanted = [p.strip() for p in ns.presets.split(",") if p.strip()]
+    else:
+        wanted = sorted(presets)
+    if ns.limit is not None:
+        wanted = wanted[: int(ns.limit)]
+    missing = [k for k in wanted if k not in presets]
+    if missing:
+        raise SystemExit(f"Unknown preset(s): {', '.join(missing)}")
+
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    runs_parent = Path(ns.runs_parent)
+    if not runs_parent.is_absolute():
+        runs_parent = BASE_DIR / runs_parent
+    batch_out = runs_parent / f"batch_status_{ts}.json"
+
+    status: dict[str, Any] = {
+        "started_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
+        "runs_parent": str(runs_parent.resolve()),
+        "presets": wanted,
+        "results": [],
+    }
+
+    for key in wanted:
+        cfg_preview = _preset_config(key)
+        basename = cfg_preview.get("output_basename", "").strip() or key
+        safe = basename.replace("/", "_").replace("\\", "_")
+        run_dir = runs_parent / safe / ts
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_config(cfg_preview, run_dir / "pipeline_config.json")
+        (run_dir / "run.json").write_text(
+            json.dumps(
+                {
+                    "created_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
+                    "command": "avi batch",
+                    "preset": key,
+                    "run_dir": str(run_dir.resolve()),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        t0 = time.time()
+        rc = 0
+        err: str | None = None
+        try:
+            env = _pipeline_env_for_run_dir(run_dir)
+            extra: list[str] = []
+            if ns.force_download:
+                extra.append("--force-download")
+            rc = _run_script("run_pipeline.py", extra, env=env)
+            if rc == 0:
+                _write_run_manifest(run_dir=run_dir)
+        except Exception as e:
+            rc = 1
+            err = f"{type(e).__name__}: {e}"
+
+        status["results"].append(
+            {
+                "preset": key,
+                "run_dir": str(run_dir.resolve()),
+                "return_code": int(rc),
+                "error": err,
+                "elapsed_sec": round(time.time() - t0, 3),
+            }
+        )
+        if rc != 0 and not ns.continue_on_error:
+            break
+
+    status["finished_utc"] = datetime.now(UTC).replace(microsecond=0).isoformat()
+    batch_out.parent.mkdir(parents=True, exist_ok=True)
+    batch_out.write_text(json.dumps(status, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"Wrote {batch_out}")
+
+    if any(r["return_code"] != 0 for r in status["results"]):
+        raise SystemExit(1)
+    return 0
 
 
 def cmd_notebook(ns: argparse.Namespace) -> int:
@@ -436,6 +682,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_init.set_defaults(func=cmd_init)
 
+    p_add = sub.add_parser(
+        "add-preset",
+        help="Add or update a preset in avi/presets.json.",
+    )
+    p_add.add_argument("key", help="Preset key (e.g. brca1, mygene).")
+    p_add.add_argument("--uniprot-id", dest="uniprot_id", default=None)
+    p_add.add_argument("--gene-symbol", dest="gene_symbol", default=None)
+    p_add.add_argument("--clinvar-esearch-term", dest="clinvar_esearch_term", default=None)
+    p_add.add_argument("--output-basename", dest="output_basename", default=None)
+    p_add.add_argument("--alphafold-fragment", dest="alphafold_fragment", default=None)
+    p_add.add_argument("--overwrite", action="store_true", help="Replace if key exists.")
+    p_add.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Do not prompt; require all fields as flags.",
+    )
+    p_add.set_defaults(func=cmd_add_preset)
+
     p_run = sub.add_parser(
         "run",
         help="Run pipeline stages (default: full download->variants->subset like scripts/run_pipeline.py).",
@@ -462,18 +726,44 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="When running full pipeline, skip build_missense_subset.py.",
     )
+    p_run.add_argument(
+        "--no-manifest",
+        action="store_true",
+        help="Skip writing repro manifest JSON to <run-dir>/data/processed/.",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_batch = sub.add_parser(
         "batch",
-        help="Run many targets (forwards args to scripts/run_batch.py).",
+        help="Run the pipeline for multiple presets into runs/ (self-contained).",
     )
     p_batch.add_argument(
-        "args",
-        nargs=argparse.REMAINDER,
-        help="Arguments forwarded to scripts/run_batch.py (use '--' if needed).",
+        "--presets",
+        default=None,
+        help="Comma-separated preset keys. Omit to run all presets in avi/presets.json.",
     )
-    p_batch.set_defaults(func=None)
+    p_batch.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Run only first N selected presets (useful for smoke runs).",
+    )
+    p_batch.add_argument(
+        "--runs-parent",
+        default="runs",
+        help="Directory under project root to store runs (default: runs).",
+    )
+    p_batch.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Force refresh of raw downloads for each run.",
+    )
+    p_batch.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Continue remaining presets if one fails.",
+    )
+    p_batch.set_defaults(func=cmd_batch)
 
     p_explain = sub.add_parser(
         "explain",
@@ -495,6 +785,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preflight checks (imports, config JSON, writable dirs).",
     )
     p_doc.set_defaults(func=cmd_doctor)
+
+    p_repro = sub.add_parser(
+        "repro",
+        help="Write a repro manifest JSON for a run (config + raw file hashes).",
+    )
+    p_repro.add_argument("--run-dir", required=True)
+    p_repro.set_defaults(func=cmd_repro)
+
+    p_clean = sub.add_parser(
+        "clean",
+        help="Prune old runs under runs/ (dry-run unless --yes).",
+    )
+    p_clean.add_argument("--runs-root", default=None)
+    p_clean.add_argument("--keep", type=int, default=20, help="Keep newest N runs (default: 20).")
+    p_clean.add_argument("--yes", action="store_true", help="Actually delete (otherwise dry-run).")
+    p_clean.set_defaults(func=cmd_clean)
 
     p_nb = sub.add_parser(
         "notebook",
@@ -553,11 +859,6 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     ns = parser.parse_args(argv)
-
-    if ns.cmd == "batch":
-        cmd = [sys.executable, str(SCRIPTS / "run_batch.py"), *list(ns.args)]
-        print("+", " ".join(cmd))
-        return subprocess.call(cmd, cwd=BASE_DIR)
 
     assert ns.func is not None
     return int(ns.func(ns))
