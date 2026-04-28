@@ -18,9 +18,12 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parents[1]
 
 
-def _run(script_name: str) -> None:
+def _run(script_name: str, extra_args: list[str] | None = None) -> None:
     script = BASE_DIR / "scripts" / script_name
-    subprocess.check_call([sys.executable, str(script)], cwd=BASE_DIR)
+    subprocess.check_call(
+        [sys.executable, str(script), *(extra_args or [])],
+        cwd=BASE_DIR,
+    )
 
 
 def main() -> None:
@@ -45,6 +48,11 @@ def main() -> None:
         action="store_true",
         help="With default run, skip build_missense_subset.py",
     )
+    p.add_argument(
+        "--force-download",
+        action="store_true",
+        help="Pass --force to download_tp53_data.py (redownload raw PDB/ClinVar JSON)",
+    )
     args = p.parse_args()
 
     flags = sum(
@@ -59,8 +67,10 @@ def main() -> None:
     if flags > 1:
         p.error("Choose at most one of --download-only / --process-only / --subset-only")
 
+    dl_extra = ["--force"] if args.force_download else []
+
     if args.download_only:
-        _run("download_tp53_data.py")
+        _run("download_tp53_data.py", dl_extra)
         return
     if args.subset_only:
         _run("build_missense_subset.py")
@@ -71,7 +81,7 @@ def main() -> None:
         print("Process + subset finished.")
         return
 
-    _run("download_tp53_data.py")
+    _run("download_tp53_data.py", dl_extra)
     _run("process_tp53_variants.py")
     if not args.no_subset:
         _run("build_missense_subset.py")
