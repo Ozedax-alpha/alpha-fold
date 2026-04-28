@@ -50,6 +50,12 @@ def test_avi_notebook_help():
 def test_avi_report_help():
     _run_help(["-m", "avi", "report", "--help"])
 
+def test_avi_open_report_help():
+    _run_help(["-m", "avi", "open-report", "--help"])
+
+def test_avi_list_runs_help():
+    _run_help(["-m", "avi", "list-runs", "--help"])
+
 
 def test_notebook_file_present():
     nb = ROOT / "notebooks" / "01_tp53_exploration.ipynb"

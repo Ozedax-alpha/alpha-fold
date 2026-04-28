@@ -8,39 +8,17 @@ import os
 import subprocess
 import sys
 import time
+import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from avi.paths import artifact_paths, default_config_path, format_paths_summary
 
-_PRESETS: dict[str, dict[str, str]] = {
-    "tp53": {
-        "uniprot_id": "P04637",
-        "gene_symbol": "TP53",
-        "clinvar_esearch_term": "TP53[gene]",
-        "output_basename": "tp53",
-        "alphafold_fragment": "F1",
-    },
-    "insulin": {
-        "uniprot_id": "P01308",
-        "gene_symbol": "INS",
-        "clinvar_esearch_term": "INS[gene]",
-        "output_basename": "insulin",
-        "alphafold_fragment": "F1",
-    },
-    "hiv-1": {
-        "uniprot_id": "P01730",
-        "gene_symbol": "CD4",
-        "clinvar_esearch_term": "CD4[gene]",
-        "output_basename": "cd4",
-        "alphafold_fragment": "F1",
-    },
-}
-
 BASE_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS = BASE_DIR / "scripts"
 NOTEBOOK_PATH = BASE_DIR / "notebooks" / "01_tp53_exploration.ipynb"
+PRESETS_PATH = Path(__file__).with_name("presets.json")
 
 
 def _run_script(name: str, extra: list[str], *, env: dict[str, str] | None = None) -> int:
@@ -58,10 +36,32 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _preset_config(preset: str) -> dict[str, str]:
     key = str(preset).strip()
-    if key not in _PRESETS:
-        avail = ", ".join(sorted(_PRESETS))
+    if not key:
+        raise SystemExit("Empty preset name.")
+    if not PRESETS_PATH.is_file():
+        raise SystemExit(f"Missing presets file: {PRESETS_PATH}")
+    try:
+        doc = json.loads(PRESETS_PATH.read_text(encoding="utf-8-sig"))
+    except Exception as e:
+        raise SystemExit(f"Failed to read {PRESETS_PATH}: {e}")
+    if not isinstance(doc, dict):
+        raise SystemExit(f"{PRESETS_PATH} must be a JSON object.")
+    entry = doc.get(key)
+    if not isinstance(entry, dict):
+        avail = ", ".join(sorted(doc))
         raise SystemExit(f"Unknown preset {key!r}. Known: {avail}")
-    return dict(_PRESETS[key])
+    out = {str(k): str(v) for k, v in entry.items()}
+    required = (
+        "uniprot_id",
+        "gene_symbol",
+        "clinvar_esearch_term",
+        "output_basename",
+        "alphafold_fragment",
+    )
+    missing = [k for k in required if k not in out or not str(out[k]).strip()]
+    if missing:
+        raise SystemExit(f"Preset {key!r} missing keys: {missing}")
+    return out
 
 
 def _write_config(cfg: dict[str, Any], path: Path) -> None:
@@ -120,6 +120,69 @@ def _export_html_report(*, run_dir: Path, env: dict[str, str]) -> int:
     )
 
 
+def _report_html_path(run_dir: Path) -> Path:
+    return run_dir / "reports" / "exploration_report.html"
+
+
+def _runs_root() -> Path:
+    return BASE_DIR / "runs"
+
+
+def _iter_run_dirs(runs_root: Path) -> list[Path]:
+    if not runs_root.is_dir():
+        return []
+    out: list[Path] = []
+    for target_dir in runs_root.iterdir():
+        if not target_dir.is_dir():
+            continue
+        for run_dir in target_dir.iterdir():
+            if run_dir.is_dir() and (run_dir / "pipeline_config.json").is_file():
+                out.append(run_dir)
+    out.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return out
+
+
+def cmd_list_runs(ns: argparse.Namespace) -> int:
+    runs_root = Path(ns.runs_root) if ns.runs_root else _runs_root()
+    if not runs_root.is_absolute():
+        runs_root = (BASE_DIR / runs_root).resolve()
+    limit = int(ns.limit)
+
+    runs = _iter_run_dirs(runs_root)[:limit]
+    if not runs:
+        print(f"No runs found under {runs_root}")
+        return 0
+
+    for rd in runs:
+        cfg = rd / "pipeline_config.json"
+        run_json = rd / "run.json"
+        out = rd / "data" / "processed"
+        vb = None
+        mm = None
+        try:
+            cdoc = json.loads(cfg.read_text(encoding="utf-8-sig"))
+            if isinstance(cdoc, dict):
+                vb = cdoc.get("output_basename")
+        except Exception:
+            vb = None
+        mm_path = out / (f"{vb}_missense_mappable.csv" if vb else "UNKNOWN")
+        vb_path = out / (f"{vb}_variants_basic.csv" if vb else "UNKNOWN")
+        mm = "yes" if vb and mm_path.is_file() else "no"
+        vb_ok = "yes" if vb and vb_path.is_file() else "no"
+        last_rc = "?"
+        if run_json.is_file():
+            try:
+                rdoc = json.loads(run_json.read_text(encoding="utf-8-sig"))
+                if isinstance(rdoc, dict):
+                    lr = (rdoc.get("last_run") or {}).get("return_code")
+                    if lr is not None:
+                        last_rc = str(lr)
+            except Exception:
+                pass
+        rel = rd.relative_to(BASE_DIR) if rd.is_absolute() else rd
+        print(f"{rel}  basename={vb or '?'}  processed={{basic:{vb_ok},subset:{mm}}}  last_rc={last_rc}")
+    return 0
+
 def cmd_init(ns: argparse.Namespace) -> int:
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     cfg_preview = _preset_config(ns.preset)
@@ -149,7 +212,13 @@ def cmd_init(ns: argparse.Namespace) -> int:
     )
     print(f"Initialized run directory:\n  {run_dir.resolve()}")
     print("\nNext:")
-    print(f"  py -m avi run --run-dir {run_dir}")
+    run_abs = str(run_dir.resolve())
+    print("  # PowerShell: copy/paste")
+    print(f"  $run = {run_abs!r}")
+    print("  py -3 -m avi run --run-dir $run --force-download")
+    print("  py -3 -m avi explain --run-dir $run")
+    print("  py -3 -m avi notebook --run-dir $run")
+    print("  py -3 -m avi report --run-dir $run")
     return 0
 
 
@@ -330,6 +399,19 @@ def cmd_report(ns: argparse.Namespace) -> int:
     return _export_html_report(run_dir=run_dir, env=env)
 
 
+def cmd_open_report(ns: argparse.Namespace) -> int:
+    run_dir = Path(ns.run_dir)
+    if not run_dir.is_absolute():
+        run_dir = (BASE_DIR / run_dir).resolve()
+    html = _report_html_path(run_dir)
+    if not html.is_file():
+        raise SystemExit(
+            f"Missing report: {html}\nRun: py -3 -m avi report --run-dir {run_dir}"
+        )
+    webbrowser.open(html.resolve().as_uri())
+    print(f"Opened: {html}")
+    return 0
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="avi",
@@ -345,7 +427,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--preset",
         required=True,
         metavar="NAME",
-        help="Preset name (built-in presets: tp53, insulin, hiv-1).",
+        help="Preset name from avi/presets.json (edit this file to add targets).",
     )
     p_init.add_argument(
         "--runs-parent",
@@ -435,6 +517,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run directory containing pipeline_config.json (sets PIPELINE_* env vars).",
     )
     p_rep.set_defaults(func=cmd_report)
+
+    p_open = sub.add_parser(
+        "open-report",
+        help="Open the HTML report for a run in your browser.",
+    )
+    p_open.add_argument(
+        "--run-dir",
+        required=True,
+        help="Run directory containing reports/exploration_report.html.",
+    )
+    p_open.set_defaults(func=cmd_open_report)
+
+    p_list = sub.add_parser(
+        "list-runs",
+        help="List recent run directories under runs/.",
+    )
+    p_list.add_argument(
+        "--runs-root",
+        default=None,
+        help="Override runs root directory (default: ./runs).",
+    )
+    p_list.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Maximum number of runs to list (default: 20).",
+    )
+    p_list.set_defaults(func=cmd_list_runs)
 
     return p
 
