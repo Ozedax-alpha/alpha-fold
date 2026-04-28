@@ -14,6 +14,30 @@ from typing import Any
 
 from avi.paths import artifact_paths, default_config_path, format_paths_summary
 
+_PRESETS: dict[str, dict[str, str]] = {
+    "tp53": {
+        "uniprot_id": "P04637",
+        "gene_symbol": "TP53",
+        "clinvar_esearch_term": "TP53[gene]",
+        "output_basename": "tp53",
+        "alphafold_fragment": "F1",
+    },
+    "insulin": {
+        "uniprot_id": "P01308",
+        "gene_symbol": "INS",
+        "clinvar_esearch_term": "INS[gene]",
+        "output_basename": "insulin",
+        "alphafold_fragment": "F1",
+    },
+    "hiv-1": {
+        "uniprot_id": "P01730",
+        "gene_symbol": "CD4",
+        "clinvar_esearch_term": "CD4[gene]",
+        "output_basename": "cd4",
+        "alphafold_fragment": "F1",
+    },
+}
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS = BASE_DIR / "scripts"
 
@@ -32,26 +56,16 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 
 def _preset_config(preset: str) -> dict[str, str]:
-    r = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPTS / "set_pipeline_config.py"),
-            "--preset",
-            preset,
-            "--dry-run",
-        ],
-        cwd=BASE_DIR,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if r.returncode != 0:
-        sys.stderr.write(r.stderr or r.stdout or "set_pipeline_config failed.\n")
-        raise SystemExit(r.returncode or 1)
-    doc = json.loads(r.stdout.strip())
-    if not isinstance(doc, dict):
-        raise SystemExit("set_pipeline_config.py --dry-run returned non-object JSON.")
-    return {str(k): str(v) for k, v in doc.items()}
+    key = str(preset).strip()
+    if key not in _PRESETS:
+        avail = ", ".join(sorted(_PRESETS))
+        raise SystemExit(f"Unknown preset {key!r}. Known: {avail}")
+    return dict(_PRESETS[key])
+
+
+def _write_config(cfg: dict[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def _git_sha_short() -> str | None:
@@ -90,13 +104,7 @@ def cmd_init(ns: argparse.Namespace) -> int:
     run_dir.mkdir(parents=True, exist_ok=False)
 
     cfg_out = run_dir / "pipeline_config.json"
-    rc = _run_script(
-        "set_pipeline_config.py",
-        ["--preset", ns.preset, "--output", str(cfg_out)],
-        env=None,
-    )
-    if rc != 0:
-        return rc
+    _write_config(cfg_preview, cfg_out)
 
     manifest = {
         "created_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
@@ -284,7 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--preset",
         required=True,
         metavar="NAME",
-        help="Preset from scripts/workflow_targets.json (see set_pipeline_config.py --list-presets).",
+        help="Preset name (built-in presets: tp53, insulin, hiv-1).",
     )
     p_init.add_argument(
         "--runs-parent",
