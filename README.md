@@ -9,6 +9,7 @@ Run everything via the CLI:
 ```bash
 py -3 -m avi doctor
 py -3 -m avi init --preset tp53
+py -3 -m avi init --from-uniprot P38398 --run --report --open-report
 py -3 -m avi add-preset brca1 --uniprot-id P38398 --gene-symbol BRCA1 --clinvar-esearch-term "BRCA1[gene]" --output-basename brca1 --alphafold-fragment F1
 py -3 -m avi run --run-dir runs/tp53/<timestamp>
 py -3 -m avi explain --run-dir runs/tp53/<timestamp>
@@ -19,6 +20,8 @@ py -3 -m avi list-runs
 py -3 -m avi repro --run-dir runs/tp53/<timestamp>
 py -3 -m avi clean --keep 20
 py -3 -m avi batch --presets tp53,insulin --continue-on-error
+py -3 -m avi add-preset brca1 --from-uniprot P38398 --auto --overwrite
+py -3 -m avi batch --from-uniprot P04637,P38398 --continue-on-error
 ```
 
 Notes:

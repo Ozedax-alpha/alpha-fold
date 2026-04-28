@@ -308,6 +308,10 @@ def cmd_add_preset(ns: argparse.Namespace) -> int:
                     f"Missing required field for non-interactive mode: {prompt}"
                 )
             return str(default)
+        if getattr(ns, "auto", False):
+            if default is None or not str(default).strip():
+                raise SystemExit(f"Missing required field for auto mode: {prompt}")
+            return str(default)
         suffix = f" [{default}]" if default else ""
         v = input(f"{prompt}{suffix}: ").strip()
         return v or (default or "")
@@ -397,6 +401,27 @@ def cmd_init(ns: argparse.Namespace) -> int:
     print("  py -3 -m avi explain --run-dir $run")
     print("  py -3 -m avi notebook --run-dir $run")
     print("  py -3 -m avi report --run-dir $run")
+
+    if getattr(ns, "run", False):
+        env = _pipeline_env_for_run_dir(run_dir)
+        extra: list[str] = []
+        if getattr(ns, "force_download", False):
+            extra.append("--force-download")
+        rc = _run_script("run_pipeline.py", extra, env=env)
+        if rc != 0:
+            return rc
+
+        # Optional post-actions (in order).
+        if getattr(ns, "report", False):
+            rc = _export_html_report(run_dir=run_dir, env=env)
+            if rc != 0:
+                return rc
+        if getattr(ns, "open_report", False):
+            # Requires report to exist; if user didn't request --report, try to open anyway.
+            cmd_open_report(argparse.Namespace(run_dir=str(run_dir)))
+        if getattr(ns, "notebook", False):
+            return cmd_notebook(argparse.Namespace(run_dir=str(run_dir)))
+
     return 0
 
 
@@ -604,18 +629,30 @@ def cmd_clean(ns: argparse.Namespace) -> int:
 
 def cmd_batch(ns: argparse.Namespace) -> int:
     presets = _load_presets()
-    if not presets:
-        raise SystemExit(f"No presets found in {PRESETS_PATH}")
 
-    if ns.presets:
-        wanted = [p.strip() for p in ns.presets.split(",") if p.strip()]
+    from_uids: list[str] | None = None
+    if getattr(ns, "from_uniprot", None):
+        from_uids = [p.strip() for p in str(ns.from_uniprot).split(",") if p.strip()]
+        if not from_uids:
+            raise SystemExit("No UniProt accessions provided.")
+
+    wanted: list[str] = []
+    if from_uids is None:
+        if not presets:
+            raise SystemExit(f"No presets found in {PRESETS_PATH}")
+        if ns.presets:
+            wanted = [p.strip() for p in ns.presets.split(",") if p.strip()]
+        else:
+            wanted = sorted(presets)
+        if ns.limit is not None:
+            wanted = wanted[: int(ns.limit)]
+        missing = [k for k in wanted if k not in presets]
+        if missing:
+            raise SystemExit(f"Unknown preset(s): {', '.join(missing)}")
     else:
-        wanted = sorted(presets)
-    if ns.limit is not None:
-        wanted = wanted[: int(ns.limit)]
-    missing = [k for k in wanted if k not in presets]
-    if missing:
-        raise SystemExit(f"Unknown preset(s): {', '.join(missing)}")
+        wanted = from_uids
+        if ns.limit is not None:
+            wanted = wanted[: int(ns.limit)]
 
     batch_ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     runs_parent = Path(ns.runs_parent)
@@ -632,8 +669,22 @@ def cmd_batch(ns: argparse.Namespace) -> int:
 
     for idx, key in enumerate(wanted):
         run_ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        cfg_preview = _preset_config(key)
-        basename = cfg_preview.get("output_basename", "").strip() or key
+        if from_uids is None:
+            cfg_preview = _preset_config(key)
+        else:
+            uid = key
+            gene = _fetch_uniprot_gene_symbol(uid) or ""
+            if not gene:
+                raise SystemExit(f"Could not resolve gene symbol for {uid}.")
+            base = _slugify_basename(gene)
+            cfg_preview = {
+                "uniprot_id": uid,
+                "gene_symbol": gene,
+                "clinvar_esearch_term": f"{gene}[gene]",
+                "output_basename": base,
+                "alphafold_fragment": "F1",
+            }
+        basename = str(cfg_preview.get("output_basename", "")).strip() or str(key)
         safe = basename.replace("/", "_").replace("\\", "_")
         # Ensure unique run timestamps (batch can run faster than 1/sec).
         suffix = f"_{idx:03d}"
@@ -672,7 +723,8 @@ def cmd_batch(ns: argparse.Namespace) -> int:
 
         status["results"].append(
             {
-                "preset": key,
+                "preset": key if from_uids is None else None,
+                "uniprot_id": key if from_uids is not None else None,
                 "run_dir": str(run_dir.resolve()),
                 "return_code": int(rc),
                 "error": err,
@@ -755,6 +807,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional label used for defaults when using --from-uniprot.",
     )
     p_init.add_argument(
+        "--run",
+        action="store_true",
+        help="After creating the run directory, immediately run the pipeline.",
+    )
+    p_init.add_argument(
+        "--force-download",
+        dest="force_download",
+        action="store_true",
+        help="With --run: force refresh of raw downloads.",
+    )
+    p_init.add_argument(
+        "--report",
+        action="store_true",
+        help="With --run: export an executed HTML report into <run-dir>/reports/.",
+    )
+    p_init.add_argument(
+        "--open-report",
+        action="store_true",
+        help="With --run: open the HTML report in your browser.",
+    )
+    p_init.add_argument(
+        "--notebook",
+        action="store_true",
+        help="With --run: launch Jupyter Notebook for this run (blocks).",
+    )
+    p_init.add_argument(
         "--runs-parent",
         default="runs",
         help="Directory under project root to store runs (default: runs).",
@@ -777,6 +855,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("--output-basename", dest="output_basename", default=None)
     p_add.add_argument("--alphafold-fragment", dest="alphafold_fragment", default=None)
     p_add.add_argument("--overwrite", action="store_true", help="Replace if key exists.")
+    p_add.add_argument(
+        "--auto",
+        action="store_true",
+        help="Non-interactive using defaults (e.g. inferred from --from-uniprot).",
+    )
     p_add.add_argument(
         "--non-interactive",
         action="store_true",
@@ -819,12 +902,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_batch = sub.add_parser(
         "batch",
-        help="Run the pipeline for multiple presets into runs/ (self-contained).",
+        help="Run the pipeline for multiple presets or UniProt accessions into runs/.",
     )
-    p_batch.add_argument(
+    srcb = p_batch.add_mutually_exclusive_group()
+    srcb.add_argument(
         "--presets",
         default=None,
         help="Comma-separated preset keys. Omit to run all presets in avi/presets.json.",
+    )
+    srcb.add_argument(
+        "--from-uniprot",
+        default=None,
+        help="Comma-separated UniProt accessions (runs without needing presets).",
     )
     p_batch.add_argument(
         "--limit",
