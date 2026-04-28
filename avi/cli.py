@@ -716,7 +716,7 @@ def cmd_clean(ns: argparse.Namespace) -> int:
     if not runs_root.is_absolute():
         runs_root = (BASE_DIR / runs_root).resolve()
     keep = int(ns.keep)
-    dry = not bool(ns.yes)
+    dry = bool(getattr(ns, "dry_run", False)) or not bool(ns.yes)
 
     runs = _iter_run_dirs(runs_root)
     victims = runs[keep:]
@@ -1106,7 +1106,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_clean.add_argument("--runs-root", default=None)
     p_clean.add_argument("--keep", type=int, default=20, help="Keep newest N runs (default: 20).")
-    p_clean.add_argument("--yes", action="store_true", help="Actually delete (otherwise dry-run).")
+    p_clean.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview deletions without removing anything (default unless --yes).",
+    )
+    p_clean.add_argument("--yes", action="store_true", help="Actually delete (overrides dry-run).")
     p_clean.set_defaults(func=cmd_clean)
 
     p_nb = sub.add_parser(
