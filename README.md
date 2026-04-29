@@ -92,4 +92,10 @@ Open `notebooks/01_target_exploration.ipynb` after the two scripts have run to e
 powershell -ExecutionPolicy Bypass -File scripts/smoke_local.ps1
 ```
 
+To skip the report/notebook execution (useful if nbconvert/Jupyter isn’t installed):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/smoke_local.ps1 -SkipReport
+```
+
 - CI runs `pytest` automatically on pushes to `main` and pull requests via `.github/workflows/tests.yml`.

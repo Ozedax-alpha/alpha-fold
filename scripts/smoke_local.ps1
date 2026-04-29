@@ -1,10 +1,15 @@
 param(
-    [string]$RunsRoot = "runs_smoke"
+    [string]$RunsRoot = "runs_smoke",
+    [switch]$SkipReport
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "== Local smoke: init -> run(resume) -> report -> gc(dry-run) =="
+if ($SkipReport) {
+    Write-Host "== Local smoke: init -> run(resume) -> (skip report) -> gc(dry-run) =="
+} else {
+    Write-Host "== Local smoke: init -> run(resume) -> report -> gc(dry-run) =="
+}
 
 # 1) Create an isolated run dir (no network required).
 py -3 -m avi init --preset tp53 --runs-parent $RunsRoot | Out-Host
@@ -31,9 +36,10 @@ $csvPath = Join-Path $processed "tp53_variants_basic.csv"
 # 3) Run resume on repro stage only (offline-safe).
 py -3 -m avi run --run-dir $run --resume --stage repro | Out-Host
 
-# 4) Create a tiny notebook for fast report execution.
-$nbPath = Join-Path $run "smoke_report.ipynb"
-$nbJson = @"
+# 4) Optional: create a tiny notebook for fast report execution.
+if (-not $SkipReport) {
+    $nbPath = Join-Path $run "smoke_report.ipynb"
+    $nbJson = @"
 {
   "cells": [
     {
@@ -60,9 +66,12 @@ $nbJson = @"
   "nbformat_minor": 5
 }
 "@
-$nbJson | Set-Content -Path $nbPath -Encoding UTF8
+    $nbJson | Set-Content -Path $nbPath -Encoding UTF8
 
-py -3 -m avi report --run-dir $run --notebook $nbPath | Out-Host
+    py -3 -m avi report --run-dir $run --notebook $nbPath | Out-Host
+} else {
+    Write-Host "Skipping report step (-SkipReport provided)."
+}
 
 # 5) GC preview only.
 py -3 -m avi gc --runs-root $RunsRoot --delete-partial --older-than-days 0 --dry-run | Out-Host
