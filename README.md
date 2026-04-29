@@ -15,10 +15,13 @@ py -3 -m avi run --run-dir runs/tp53/<timestamp>
 py -3 -m avi explain --run-dir runs/tp53/<timestamp>
 py -3 -m avi notebook --run-dir runs/tp53/<timestamp>
 py -3 -m avi report --run-dir runs/tp53/<timestamp>
+py -3 -m avi report --run-dir runs/tp53/<timestamp> --notebook notebooks/01_target_exploration.ipynb
 py -3 -m avi open-report --run-dir runs/tp53/<timestamp>
 py -3 -m avi list-runs
 py -3 -m avi repro --run-dir runs/tp53/<timestamp>
 py -3 -m avi clean --keep 20
+py -3 -m avi gc --delete-partial --older-than-days 7 --dry-run
+py -3 -m avi gc --delete-partial --older-than-days 7 --yes
 py -3 -m avi batch --presets tp53,insulin --continue-on-error
 py -3 -m avi add-preset brca1 --from-uniprot P38398 --auto --overwrite
 py -3 -m avi batch --from-uniprot P04637,P38398 --continue-on-error
@@ -27,6 +30,8 @@ py -3 -m avi batch --from-uniprot P04637,P38398 --continue-on-error
 Notes:
 - `avi init` creates a timestamped run directory under `runs/` containing `pipeline_config.json`.
 - `avi run --run-dir ...` writes outputs to `<run-dir>/data/{raw,processed}/` via `PIPELINE_CONFIG_PATH` / `PIPELINE_OUTPUT_DIR`.
+- `avi report` defaults to `notebooks/01_target_exploration.ipynb`; use `--notebook` to override.
+- `avi gc` safely garbage-collects broken/partial runs (`--dry-run` by default unless `--yes`).
 - Presets live in `avi/presets.json` (edit to add targets).
 
 ## Layout
@@ -77,4 +82,4 @@ Outputs (with default `output_basename` `tp53`):
 
 ## Notebook
 
-Open `notebooks/01_tp53_exploration.ipynb` after the two scripts have run to explore the CSV and structure locally.
+Open `notebooks/01_target_exploration.ipynb` after the two scripts have run to explore the CSV and structure locally.
