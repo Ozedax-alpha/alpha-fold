@@ -83,3 +83,13 @@ Outputs (with default `output_basename` `tp53`):
 ## Notebook
 
 Open `notebooks/01_target_exploration.ipynb` after the two scripts have run to explore the CSV and structure locally.
+
+## Quality checks
+
+- Local end-to-end smoke (isolated under `runs_smoke/`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/smoke_local.ps1
+```
+
+- CI runs `pytest` automatically on pushes to `main` and pull requests via `.github/workflows/tests.yml`.
