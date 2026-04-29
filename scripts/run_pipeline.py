@@ -16,6 +16,11 @@ import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+# Shared stage ordering used by `avi run`.
+from avi.pipeline import STAGE_ORDER  # noqa: E402
 
 
 def _run(script_name: str, extra_args: list[str] | None = None) -> None:
@@ -81,10 +86,18 @@ def main() -> None:
         print("Process + subset finished.")
         return
 
-    _run("download_tp53_data.py", dl_extra)
-    _run("process_tp53_variants.py")
-    if not args.no_subset:
-        _run("build_missense_subset.py")
+    stage_to_script = {
+        "download": ("download_tp53_data.py", dl_extra),
+        "variants": ("process_tp53_variants.py", []),
+        "subset": ("build_missense_subset.py", []),
+    }
+    for stage in STAGE_ORDER:
+        if stage not in stage_to_script:
+            continue
+        if stage == "subset" and args.no_subset:
+            continue
+        script, extra = stage_to_script[stage]
+        _run(script, extra)
     print(
         "Pipeline finished: data/raw/, data/processed/<basename>_variants_basic.csv, "
         "data/processed/<basename>_missense_mappable.csv"

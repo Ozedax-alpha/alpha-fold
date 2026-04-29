@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from avi.paths import artifact_paths, default_config_path, format_paths_summary
+from avi.pipeline import STAGE_ORDER, StageContext, run_stages
 
 try:
     import requests  # type: ignore
@@ -25,7 +26,7 @@ except Exception:  # pragma: no cover
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS = BASE_DIR / "scripts"
-NOTEBOOK_PATH = BASE_DIR / "notebooks" / "01_tp53_exploration.ipynb"
+NOTEBOOK_PATH = BASE_DIR / "notebooks" / "01_target_exploration.ipynb"
 PRESETS_PATH = Path(__file__).with_name("presets.json")
 
 
@@ -204,11 +205,29 @@ def _run_module(module: str, args: list[str], *, env: dict[str, str] | None) -> 
     return subprocess.call(cmd, cwd=BASE_DIR, env=env)
 
 
-def _export_html_report(*, run_dir: Path, env: dict[str, str]) -> int:
+def _export_html_report(*, run_dir: Path, env: dict[str, str], notebook_path: Path | None = None) -> int:
     out_dir = run_dir / "reports"
     out_dir.mkdir(parents=True, exist_ok=True)
-    if not NOTEBOOK_PATH.is_file():
-        raise SystemExit(f"Missing notebook: {NOTEBOOK_PATH}")
+    nb = notebook_path or NOTEBOOK_PATH
+    if not nb.is_file():
+        raise SystemExit(f"Missing notebook: {nb}")
+
+    # Preflight: the default notebook expects variants CSV to exist.
+    cfg_path = run_dir / "pipeline_config.json"
+    if cfg_path.is_file():
+        try:
+            cfg = _load_json(cfg_path)
+            art = artifact_paths(cfg, run_dir / "data")
+            vb = art["variants_basic_csv"]
+            if not vb.is_file():
+                raise SystemExit(
+                    f"Missing required artifact: {vb}\nRun first: py -3 -m avi run --run-dir {run_dir}"
+                )
+        except SystemExit:
+            raise
+        except Exception:
+            # If config parsing fails, fall back to letting nbconvert show an error.
+            pass
     return _run_module(
         "jupyter",
         [
@@ -216,7 +235,7 @@ def _export_html_report(*, run_dir: Path, env: dict[str, str]) -> int:
             "--to",
             "html",
             "--execute",
-            str(NOTEBOOK_PATH),
+            str(nb),
             "--output",
             "exploration_report",
             "--output-dir",
@@ -228,45 +247,6 @@ def _export_html_report(*, run_dir: Path, env: dict[str, str]) -> int:
 
 def _report_html_path(run_dir: Path) -> Path:
     return run_dir / "reports" / "exploration_report.html"
-
-
-def _run_state_path(run_dir: Path) -> Path:
-    return run_dir / "run_state.json"
-
-
-def _load_run_state(run_dir: Path) -> dict[str, Any]:
-    p = _run_state_path(run_dir)
-    if not p.is_file():
-        return {"stages": {}}
-    try:
-        doc: Any = json.loads(p.read_text(encoding="utf-8-sig"))
-    except Exception:
-        return {"stages": {}}
-    if not isinstance(doc, dict):
-        return {"stages": {}}
-    if "stages" not in doc or not isinstance(doc.get("stages"), dict):
-        doc["stages"] = {}
-    return doc
-
-
-def _save_run_state(run_dir: Path, state: dict[str, Any]) -> None:
-    _atomic_write_text(_run_state_path(run_dir), json.dumps(state, indent=2, ensure_ascii=False) + "\n")
-
-
-def _artifact_done_for_stage(stage: str, *, run_dir: Path, cfg: dict[str, Any]) -> bool:
-    data_root = run_dir / "data"
-    art = artifact_paths(cfg, data_root)
-    if stage == "download":
-        return art["alphafold_pdb"].is_file() and art["clinvar_json"].is_file()
-    if stage == "variants":
-        return art["variants_basic_csv"].is_file()
-    if stage == "subset":
-        return art["missense_mappable_csv"].is_file()
-    if stage == "report":
-        return _report_html_path(run_dir).is_file()
-    if stage == "repro":
-        return art["repro_manifest"].is_file()
-    return False
 
 
 def _runs_root() -> Path:
@@ -489,92 +469,62 @@ def cmd_run(ns: argparse.Namespace) -> int:
             extra.append("--no-subset")
         rc = _run_script("run_pipeline.py", extra, env=env)
     else:
-        order = ["download", "variants", "subset", "report", "repro"]
-        wanted: list[str] = []
+        wanted: list[str]
         if stages:
-            for s in stages:
-                if s not in order:
-                    raise SystemExit(
-                        f"Unknown stage {s!r}. Choose from: {', '.join(order)}"
-                    )
-                if s not in wanted:
-                    wanted.append(s)
+            wanted = list(stages)
         else:
             wanted = ["download", "variants"]
             if not ns.no_subset:
                 wanted.append("subset")
 
         cfg: dict[str, Any] | None = None
-        state: dict[str, Any] | None = None
         if run_dir is not None:
             cfg_path = run_dir / "pipeline_config.json"
             if cfg_path.is_file():
                 cfg = _load_json(cfg_path)
-            state = _load_run_state(run_dir)
 
-        for s in order:
-            if s not in wanted:
-                continue
-            if getattr(ns, "resume", False) and run_dir is not None and cfg is not None:
-                if _artifact_done_for_stage(s, run_dir=run_dir, cfg=cfg):
-                    if state is not None:
-                        stages_state = state.setdefault("stages", {})
-                        if isinstance(stages_state, dict):
-                            stages_state[str(s)] = {
-                                "skipped": True,
-                                "reason": "already complete",
-                                "finished_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
-                                "return_code": 0,
-                            }
-                            _save_run_state(run_dir, state)
-                    print(f"= Skipping stage {s!r} (already complete)")
-                    rc = 0
-                    continue
-
-            if state is not None:
-                stages_state = state.setdefault("stages", {})
-                if isinstance(stages_state, dict):
-                    stages_state[str(s)] = {
-                        "started_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
-                    }
-                    _save_run_state(run_dir, state)
-
-            if s == "download":
+        def _runner(stage: str) -> int:
+            nonlocal run_dir, env
+            if stage == "download":
                 dl = ["--force"] if ns.force_download else []
-                rc = _run_script("download_tp53_data.py", dl, env=env)
-            elif s == "variants":
-                rc = _run_script("process_tp53_variants.py", [], env=env)
-            elif s == "subset":
-                rc = _run_script("build_missense_subset.py", [], env=env)
-            elif s == "report":
+                return _run_script("download_tp53_data.py", dl, env=env)
+            if stage == "variants":
+                return _run_script("process_tp53_variants.py", [], env=env)
+            if stage == "subset":
+                return _run_script("build_missense_subset.py", [], env=env)
+            if stage == "report":
                 if run_dir is None or env is None:
                     raise SystemExit("Stage 'report' requires --run-dir.")
-                rc = _export_html_report(run_dir=run_dir, env=env)
-            elif s == "repro":
+                return _export_html_report(run_dir=run_dir, env=env)
+            if stage == "repro":
                 if run_dir is None:
                     raise SystemExit("Stage 'repro' requires --run-dir.")
                 try:
                     out = _write_run_manifest(run_dir=run_dir)
                     print(f"Wrote {out}")
-                    rc = 0
+                    return 0
                 except Exception as e:
                     print(f"Manifest error: {e}", file=sys.stderr)
-                    rc = 1
+                    return 1
+            raise SystemExit(
+                f"Unknown stage {stage!r}. Choose from: {', '.join(STAGE_ORDER)}"
+            )
 
-            if state is not None:
-                stages_state = state.setdefault("stages", {})
-                if isinstance(stages_state, dict):
-                    prev = stages_state.get(str(s)) if isinstance(stages_state.get(str(s)), dict) else {}
-                    prev.update(
-                        {
-                            "finished_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
-                            "return_code": int(rc),
-                        }
-                    )
-                    stages_state[str(s)] = prev
-                    _save_run_state(run_dir, state)
-            if rc != 0:
-                break
+        if run_dir is None:
+            raise SystemExit("Stage execution requires --run-dir.")
+        ctx = StageContext(
+            run_dir=run_dir,
+            env=env,
+            cfg=cfg,
+            resume=bool(getattr(ns, 'resume', False)),
+            report_html=_report_html_path(run_dir),
+        )
+        rc = run_stages(
+            ctx=ctx,
+            stages=wanted,
+            stage_runner=_runner,
+            atomic_write_text=_atomic_write_text,
+        )
 
     elapsed = round(time.time() - started, 3)
     if run_dir is not None:
@@ -736,6 +686,67 @@ def cmd_clean(ns: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gc(ns: argparse.Namespace) -> int:
+    runs_root = Path(ns.runs_root) if ns.runs_root else _runs_root()
+    if not runs_root.is_absolute():
+        runs_root = (BASE_DIR / runs_root).resolve()
+
+    dry = bool(getattr(ns, "dry_run", False)) or not bool(ns.yes)
+    older_days = int(ns.older_than_days) if getattr(ns, "older_than_days", None) is not None else None
+    now = time.time()
+
+    targets: list[Path] = []
+    for target_dir in runs_root.iterdir() if runs_root.is_dir() else []:
+        if not target_dir.is_dir():
+            continue
+        for run_dir in target_dir.iterdir():
+            if not run_dir.is_dir():
+                continue
+
+            cfg = run_dir / "pipeline_config.json"
+            if getattr(ns, "delete_empty", False) and not cfg.is_file():
+                targets.append(run_dir)
+                continue
+
+            if older_days is not None:
+                age_days = (now - run_dir.stat().st_mtime) / (60 * 60 * 24)
+                if age_days < older_days:
+                    continue
+
+            if getattr(ns, "delete_partial", False):
+                if not cfg.is_file():
+                    continue
+                try:
+                    cdoc = json.loads(cfg.read_text(encoding="utf-8-sig"))
+                except Exception:
+                    continue
+                base = cdoc.get("output_basename") if isinstance(cdoc, dict) else None
+                if not base:
+                    continue
+                vb = run_dir / "data" / "processed" / f"{base}_variants_basic.csv"
+                if not vb.is_file():
+                    targets.append(run_dir)
+
+    # De-dup and sort oldest first (so output is stable).
+    uniq: dict[str, Path] = {str(p.resolve()): p for p in targets}
+    victims = sorted(uniq.values(), key=lambda p: p.stat().st_mtime)
+
+    if not victims:
+        print("Nothing to garbage-collect.")
+        return 0
+
+    for rd in victims:
+        rel = rd.relative_to(BASE_DIR) if rd.is_absolute() else rd
+        if dry:
+            print(f"DRY-RUN delete: {rel}")
+        else:
+            shutil.rmtree(rd)
+            print(f"Deleted: {rel}")
+    if dry:
+        print("Dry run only. Re-run with --yes to delete.")
+    return 0
+
+
 def cmd_batch(ns: argparse.Namespace) -> int:
     presets = _load_presets()
 
@@ -872,7 +883,10 @@ def cmd_report(ns: argparse.Namespace) -> int:
     if not run_dir.is_absolute():
         run_dir = (BASE_DIR / run_dir).resolve()
     env = _pipeline_env_for_run_dir(run_dir)
-    return _export_html_report(run_dir=run_dir, env=env)
+    nb = Path(ns.notebook) if getattr(ns, "notebook", None) else None
+    if nb is not None and not nb.is_absolute():
+        nb = (BASE_DIR / nb).resolve()
+    return _export_html_report(run_dir=run_dir, env=env, notebook_path=nb)
 
 
 def cmd_open_report(ns: argparse.Namespace) -> int:
@@ -1114,6 +1128,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--yes", action="store_true", help="Actually delete (overrides dry-run).")
     p_clean.set_defaults(func=cmd_clean)
 
+    p_gc = sub.add_parser(
+        "gc",
+        help="Garbage-collect problematic runs (dry-run unless --yes).",
+    )
+    p_gc.add_argument("--runs-root", default=None)
+    p_gc.add_argument(
+        "--delete-empty",
+        action="store_true",
+        help="Delete run dirs missing pipeline_config.json.",
+    )
+    p_gc.add_argument(
+        "--delete-partial",
+        action="store_true",
+        help="Delete run dirs that have a config but no processed *_variants_basic.csv.",
+    )
+    p_gc.add_argument(
+        "--older-than-days",
+        type=int,
+        default=None,
+        help="Only target runs older than N days (by mtime).",
+    )
+    p_gc.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview deletions without removing anything (default unless --yes).",
+    )
+    p_gc.add_argument("--yes", action="store_true", help="Actually delete (overrides dry-run).")
+    p_gc.set_defaults(func=cmd_gc)
+
     p_nb = sub.add_parser(
         "notebook",
         help="Launch Jupyter Notebook with this run's env vars set.",
@@ -1133,6 +1176,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-dir",
         required=True,
         help="Run directory containing pipeline_config.json (sets PIPELINE_* env vars).",
+    )
+    p_rep.add_argument(
+        "--notebook",
+        default=None,
+        help="Override notebook path to execute (default: notebooks/01_target_exploration.ipynb).",
     )
     p_rep.set_defaults(func=cmd_report)
 
