@@ -8,3 +8,10 @@ repos:
       - id: check-yaml
       - id: check-json
         exclude: ^runs/
+  - repo: local
+    hooks:
+      - id: nb-clean
+        name: Normalize notebooks (strip outputs)
+        entry: py -3 scripts/nb_clean.py
+        language: system
+        files: \.ipynb$
