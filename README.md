@@ -59,6 +59,10 @@ pip install -e .
 pip install -e ".[cache]"
 ```
 
+### Developers
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for tests, pre-commit, NCBI etiquette, and a minimal one-gene repro checklist.
+
 ### Environment variables
 
 Copy `.env.example` to `.env` (or export in your shell). Important values:
@@ -117,7 +121,7 @@ After `*_missense_mappable.csv` exists:
 py -3 -m avi evaluate --run-dir runs/tp53/<timestamp>
 ```
 
-Writes `data/processed/evaluation_metrics.json` with Cohen’s *d* (train) and a rank AUC (test) for each numeric feature. Uses **time-based** holdout when `germline_date_last_evaluated` is populated for enough rows; otherwise a **stratified random** split (`--seed`).
+Writes `data/processed/evaluation_metrics.json` with Cohen’s *d* (train) and a rank AUC (test) for each numeric feature, plus **`split_metadata`** (dated-row counts and train/test pathogenic fractions). Uses **time-based** holdout when enough rows have a parseable `germline_date_last_evaluated` and the chronological test fold still has both classes; otherwise a **stratified random** split. Tuning: `avi evaluate --run-dir ... --seed 42 --min-dated-rows 50`.
 
 ## Notebook
 

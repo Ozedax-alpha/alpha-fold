@@ -845,6 +845,9 @@ def cmd_batch(ns: argparse.Namespace) -> int:
             rc = 1
             err = f"{type(e).__name__}: {e}"
 
+        if rc != 0 and not err:
+            err = "run_pipeline.py exited with non-zero status (see logged commands above)."
+
         status["results"].append(
             {
                 "preset": key if from_uids is None else None,
@@ -869,9 +872,12 @@ def cmd_batch(ns: argparse.Namespace) -> int:
         for r in failed:
             label = r.get("preset") or r.get("uniprot_id") or "?"
             err = r.get("error") or ""
-            print(f"  {label!r} rc={r.get('return_code')} {r.get('run_dir')}")
+            rd = r.get("run_dir") or ""
+            print(f"  {label!r} rc={r.get('return_code')} {rd}")
             if err:
                 print(f"    {err}")
+            if rd:
+                print(f"    Re-run: py -3 -m avi run --run-dir {rd!r}")
     if any(r["return_code"] != 0 for r in status["results"]):
         raise SystemExit(1)
     return 0
@@ -922,11 +928,15 @@ def cmd_evaluate(ns: argparse.Namespace) -> int:
         run_dir = (BASE_DIR / run_dir).resolve()
     if not (run_dir / "pipeline_config.json").is_file():
         raise SystemExit(f"Missing pipeline_config.json under {run_dir}")
-    return _run_script(
-        "evaluation_metrics.py",
-        ["--run-dir", str(run_dir)],
-        env=None,
-    )
+    extra = [
+        "--run-dir",
+        str(run_dir),
+        "--seed",
+        str(ns.seed),
+        "--min-dated-rows",
+        str(ns.min_dated_rows),
+    ]
+    return _run_script("evaluation_metrics.py", extra, env=None)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1230,6 +1240,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-dir",
         required=True,
         help="Run directory with data/processed/*_missense_mappable.csv.",
+    )
+    p_ev.add_argument("--seed", type=int, default=42, help="Stratified split RNG seed.")
+    p_ev.add_argument(
+        "--min-dated-rows",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Minimum parseable germline_date_last_evaluated rows to use time-based split.",
     )
     p_ev.set_defaults(func=cmd_evaluate)
 

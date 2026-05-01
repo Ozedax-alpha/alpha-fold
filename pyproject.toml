@@ -20,6 +20,9 @@ dependencies = [
 
 [project.optional-dependencies]
 cache = ["requests-cache"]
+dev = [
+    "pre-commit>=3.0",
+]
 
 [project.scripts]
 avi = "avi.cli:main"

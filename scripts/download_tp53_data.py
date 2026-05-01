@@ -41,6 +41,45 @@ def _eutils_pause_sec() -> float:
     return 0.11 if os.environ.get("NCBI_API_KEY") else 0.34
 
 
+def _ncbi_retry_get(
+    session: requests.Session,
+    url: str,
+    *,
+    params: dict[str, object],
+    timeout: float,
+    label: str,
+) -> requests.Response:
+    """GET with limited retries on HTTP 429 / 5xx (pacing remains the caller’s responsibility)."""
+    last_err: Exception | None = None
+    for attempt in range(5):
+        try:
+            r = session.get(url, params=params, timeout=timeout)
+            if r.status_code == 429:
+                wait = min(90.0, 1.5**attempt + 0.5)
+                print(
+                    f"NCBI returned HTTP 429 ({label}); waiting {wait:.1f}s "
+                    f"(retry {attempt + 1}/5). Set NCBI_API_KEY for higher rate limits."
+                )
+                time.sleep(wait)
+                continue
+            if r.status_code >= 500:
+                wait = min(60.0, 2.0**attempt)
+                print(f"NCBI server error HTTP {r.status_code} ({label}); retry in {wait:.1f}s.")
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            return r
+        except requests.RequestException as e:
+            last_err = e
+            if attempt >= 4:
+                break
+            time.sleep(min(30.0, (attempt + 1) * 0.5))
+    raise RuntimeError(
+        f"ClinVar / NCBI request failed ({label}): {last_err}\n"
+        "Set ENTREZ_EMAIL (and optionally NCBI_API_KEY) per NCBI guidelines, then retry."
+    ) from last_err
+
+
 def _http_session() -> requests.Session:
     """Optional disk cache when ``AVI_USE_HTTP_CACHE=1`` and ``requests-cache`` is installed."""
     flag = os.environ.get("AVI_USE_HTTP_CACHE", "").strip().lower()
@@ -155,14 +194,13 @@ def _esearch_clinvar_tp53_ids(session: requests.Session) -> list[str]:
             "retmode": "json",
         }
     )
-    try:
-        r = session.get(f"{EUTILS_BASE}/esearch.fcgi", params=params, timeout=60)
-        r.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(
-            f"ClinVar ESearch failed for term {ESEARCH_TERM!r}: {e}\n"
-            "Set ENTREZ_EMAIL (and optionally NCBI_API_KEY) per NCBI guidelines, then retry."
-        ) from e
+    r = _ncbi_retry_get(
+        session,
+        f"{EUTILS_BASE}/esearch.fcgi",
+        params=params,
+        timeout=60,
+        label=f"ClinVar ESearch {ESEARCH_TERM!r}",
+    )
     data = r.json()
     idlist = data.get("esearchresult", {}).get("idlist", [])
     if not idlist:
@@ -180,14 +218,13 @@ def _esummary_batch(
             "retmode": "json",
         }
     )
-    try:
-        r = session.get(f"{EUTILS_BASE}/esummary.fcgi", params=params, timeout=120)
-        r.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(
-            f"ClinVar ESummary batch failed for {len(ids)} ids: {e}\n"
-            "If this is intermittent, retry; otherwise verify NCBI status and credentials."
-        ) from e
+    r = _ncbi_retry_get(
+        session,
+        f"{EUTILS_BASE}/esummary.fcgi",
+        params=params,
+        timeout=120,
+        label=f"ClinVar ESummary ({len(ids)} ids)",
+    )
     payload = r.json()
     result = payload.get("result", {})
     uids = result.get("uids", [])

@@ -80,12 +80,31 @@ def stratified_split_indices(
     return np.array(sorted(train_parts)), np.array(sorted(test_parts))
 
 
+def _count_parseable_eval_dates(dates: list[str | float | None]) -> int:
+    n = 0
+    for x in dates:
+        if pd.isna(x) or not str(x).strip():
+            continue
+        if _parse_eval_date(str(x)) is not None:
+            n += 1
+    return n
+
+
 def time_split_indices(
-    dates: list[str | float | None], n_rows: int, *, test_fraction: float
+    dates: list[str | float | None],
+    n_rows: int,
+    *,
+    test_fraction: float,
+    min_valid_dates: int,
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    keys = np.array([_date_key(_parse_eval_date(str(x))) if pd.notna(x) and str(x).strip() else 0 for x in dates])
+    keys = np.array(
+        [
+            _date_key(_parse_eval_date(str(x))) if pd.notna(x) and str(x).strip() else 0
+            for x in dates
+        ]
+    )
     valid = keys > 0
-    if int(valid.sum()) < 50:
+    if int(valid.sum()) < min_valid_dates:
         return None
     order = np.argsort(keys)
     n = n_rows
@@ -112,6 +131,12 @@ def main() -> None:
     )
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--test-fraction", type=float, default=0.2)
+    ap.add_argument(
+        "--min-dated-rows",
+        type=int,
+        default=50,
+        help="Minimum rows with a parseable germline_date_last_evaluated to use time-based split.",
+    )
     ap.add_argument(
         "--out-json",
         type=str,
@@ -153,7 +178,12 @@ def main() -> None:
 
     y = sub["clinical_significance_bucket"].isin(["Pathogenic", "Likely pathogenic"]).astype(int).to_numpy()
 
+    n_dated = 0
+    if "germline_date_last_evaluated" in sub.columns:
+        n_dated = _count_parseable_eval_dates(sub["germline_date_last_evaluated"].tolist())
+
     split_mode = "random_stratified"
+    use_time = False
     train_idx: np.ndarray
     test_idx: np.ndarray
 
@@ -162,12 +192,17 @@ def main() -> None:
             sub["germline_date_last_evaluated"].tolist(),
             len(sub),
             test_fraction=args.test_fraction,
+            min_valid_dates=int(args.min_dated_rows),
         )
         if ts is not None:
-            train_idx, test_idx = ts
-            split_mode = "time_based_on_germline_date"
+            tr, te = ts
+            y_te = y[te]
+            if (y_te == 1).sum() >= 1 and (y_te == 0).sum() >= 1:
+                train_idx, test_idx = tr, te
+                use_time = True
+                split_mode = "time_based_on_germline_date"
 
-    if split_mode == "random_stratified":
+    if not use_time:
         train_idx, test_idx = stratified_split_indices(
             y, test_fraction=args.test_fraction, seed=args.seed
         )
@@ -185,14 +220,21 @@ def main() -> None:
     if not feat_cols:
         raise SystemExit("No numeric feature columns found in missense CSV.")
 
+    y_tr, y_te = y[train_idx], y[test_idx]
     report: dict = {
         "split_mode": split_mode,
         "n_train": int(len(train_idx)),
         "n_test": int(len(test_idx)),
+        "split_metadata": {
+            "n_label_rows_path_vs_benign": int(len(sub)),
+            "n_rows_with_parseable_germline_date": int(n_dated),
+            "min_dated_rows_for_time_split": int(args.min_dated_rows),
+            "train_pathogenic_fraction": float(y_tr.mean()) if len(y_tr) else float("nan"),
+            "test_pathogenic_fraction": float(y_te.mean()) if len(y_te) else float("nan"),
+        },
         "features": {},
     }
 
-    y_tr, y_te = y[train_idx], y[test_idx]
     pos_tr = y_tr == 1
     neg_tr = y_tr == 0
 

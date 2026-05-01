@@ -57,4 +57,6 @@ def test_evaluation_metrics_script_writes_json(tmp_path: Path) -> None:
     assert out.is_file()
     doc = json.loads(out.read_text(encoding="utf-8"))
     assert doc["split_mode"] in ("time_based_on_germline_date", "random_stratified")
+    assert "split_metadata" in doc
+    assert doc["split_metadata"]["n_rows_with_parseable_germline_date"] == 120
     assert "alphafold_confidence_score" in doc["features"]
