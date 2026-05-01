@@ -1,0 +1,12 @@
+* text=auto
+
+# Keep diffs stable across Windows/Linux
+*.py        text eol=lf
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.json      text eol=lf
+*.toml      text eol=lf
+*.ps1       text eol=lf
+*.ipynb     text eol=lf
+
