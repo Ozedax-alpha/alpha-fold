@@ -1153,6 +1153,162 @@ def cmd_ui(ns: argparse.Namespace) -> int:
     avi_webui.serve(base_dir=BASE_DIR, db_path=db_path, host=str(ns.host), port=int(ns.port))
     return 0
 
+
+def cmd_dataset_run(ns: argparse.Namespace) -> int:
+    """
+    Batch runner driven by a protein manifest -> runs/ + avi.db.
+
+    This is the "universal" entry point for scaling to many proteins: load targets into SQLite,
+    execute pipeline per target, and index artifacts/metrics for the UI.
+    """
+    db_path = Path(ns.db)
+    if not db_path.is_absolute():
+        db_path = (BASE_DIR / db_path).resolve()
+    runs_parent = Path(ns.runs_parent)
+    if not runs_parent.is_absolute():
+        runs_parent = (BASE_DIR / runs_parent).resolve()
+
+    # Ensure DB exists and load targets.
+    con = avi_db.connect(db_path)
+    try:
+        avi_db.init_db(con)
+    finally:
+        con.close()
+
+    # Import targets from manifest if provided.
+    if ns.manifest:
+        # Reuse the db import-manifest command to keep behavior consistent.
+        cmd_db_import_manifest(
+            argparse.Namespace(db=str(db_path), manifest=str(ns.manifest))
+        )
+
+    # Select proteins to run.
+    con = avi_db.connect(db_path)
+    try:
+        avi_db.init_db(con)
+        wanted_keys: list[str] | None = None
+        if ns.presets:
+            wanted_keys = [p.strip() for p in str(ns.presets).split(",") if p.strip()]
+
+        rows = con.execute("SELECT * FROM proteins ORDER BY updated_utc DESC;").fetchall()
+        selected = []
+        for r in rows:
+            if wanted_keys is not None:
+                pk = (r["preset_key"] or "").strip()
+                if pk not in wanted_keys:
+                    continue
+            selected.append(r)
+        if ns.limit is not None:
+            selected = selected[: int(ns.limit)]
+    finally:
+        con.close()
+
+    if not selected:
+        raise SystemExit("No proteins selected. Import a manifest or set --presets.")
+
+    failures: list[tuple[str, str]] = []
+    for idx, p in enumerate(selected):
+        cfg_preview = {
+            "uniprot_id": str(p["uniprot_id"]),
+            "gene_symbol": str(p["gene_symbol"] or ""),
+            "clinvar_esearch_term": str(p["clinvar_esearch_term"] or f"{p['gene_symbol']}[gene]"),
+            "output_basename": str(p["output_basename"] or (p["gene_symbol"] or p["uniprot_id"])).strip(),
+            "alphafold_fragment": str(p["alphafold_fragment"] or "F1"),
+        }
+        basename = str(cfg_preview["output_basename"]).strip() or str(p["uniprot_id"])
+        safe = basename.replace("/", "_").replace("\\", "_")
+        run_ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        suffix = f"_{idx:03d}"
+        run_dir = runs_parent / safe / f"{run_ts}{suffix}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_config(cfg_preview, run_dir / "pipeline_config.json")
+        (run_dir / "run.json").write_text(
+            json.dumps(
+                {
+                    "created_utc": datetime.now(UTC).replace(microsecond=0).isoformat(),
+                    "command": "avi dataset run",
+                    "protein_id": int(p["id"]),
+                    "run_dir": str(run_dir.resolve()),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        rc = 0
+        err: str | None = None
+        try:
+            env = _pipeline_env_for_run_dir(run_dir)
+            extra: list[str] = []
+            if ns.force_download:
+                extra.append("--force-download")
+            rc = _run_script("run_pipeline.py", extra, env=env)
+            if rc == 0:
+                _write_run_manifest(run_dir=run_dir)
+                if ns.report:
+                    _export_html_report(run_dir=run_dir, env=env, notebook_path=None)
+                if ns.evaluate:
+                    ev_args = [
+                        "--run-dir",
+                        str(run_dir),
+                        "--seed",
+                        str(ns.evaluate_seed),
+                        "--min-label-rows",
+                        str(ns.evaluate_min_label_rows),
+                        "--min-dated-rows",
+                        str(ns.evaluate_min_dated_rows),
+                    ]
+                    rc = _run_script("evaluation_metrics.py", ev_args, env=None)
+        except Exception as e:
+            rc = 1
+            err = f"{type(e).__name__}: {e}"
+
+        # Index into DB (best effort).
+        try:
+            con = avi_db.connect(db_path)
+            try:
+                avi_db.init_db(con)
+                cfg = _load_json(run_dir / "pipeline_config.json")
+                art = artifact_paths(cfg, run_dir / "data")
+                report_html = run_dir / "reports" / "exploration_report.html"
+                eval_json = art.get("evaluation_metrics_json")
+                eval_path = eval_json if isinstance(eval_json, Path) and eval_json.is_file() else None
+                run_id = avi_db.upsert_run(
+                    con,
+                    run_dir=run_dir,
+                    protein_id=int(p["id"]),
+                    created_utc=None,
+                    status="ok" if rc == 0 else "failed",
+                    report_html_path=report_html if report_html.is_file() else None,
+                    evaluation_json_path=eval_path,
+                    error=err,
+                )
+                if eval_path is not None:
+                    try:
+                        doc = json.loads(eval_path.read_text(encoding="utf-8-sig"))
+                        if isinstance(doc, dict):
+                            avi_db.upsert_run_metrics(con, run_id=run_id, metrics=doc)
+                    except Exception:
+                        pass
+            finally:
+                con.close()
+        except Exception:
+            pass
+
+        if rc != 0:
+            label = str(p["gene_symbol"] or p["preset_key"] or p["uniprot_id"])
+            failures.append((label, str(run_dir)))
+            if not ns.continue_on_error:
+                break
+
+    if failures:
+        print(f"Dataset run finished with {len(failures)} failure(s):")
+        for lab, rd in failures:
+            print(f"  {lab}: {rd}")
+        raise SystemExit(1)
+    return 0
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="avi",
@@ -1532,6 +1688,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000).")
     p_ui.add_argument("--open", action="store_true", help="Open the UI in your browser.")
     p_ui.set_defaults(func=cmd_ui)
+
+    p_ds = sub.add_parser(
+        "dataset",
+        help="Run pipeline across many proteins from manifest/DB (updates avi.db for UI).",
+    )
+    dssub = p_ds.add_subparsers(dest="ds_cmd", required=True)
+    p_ds_run = dssub.add_parser("run", help="Run pipeline over a set of proteins.")
+    p_ds_run.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to avi.db (default: ./avi.db).")
+    p_ds_run.add_argument(
+        "--manifest",
+        default=None,
+        help="Optional manifest CSV/TSV to import before running (see data/proteins_manifest_example.csv).",
+    )
+    p_ds_run.add_argument(
+        "--presets",
+        default=None,
+        help="Optional comma-separated preset_key filters (runs all proteins if omitted).",
+    )
+    p_ds_run.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Run only first N selected proteins (useful for smoke runs).",
+    )
+    p_ds_run.add_argument(
+        "--runs-parent",
+        default="runs_dataset",
+        help="Output parent directory under repo (default: runs_dataset).",
+    )
+    p_ds_run.add_argument("--force-download", action="store_true", help="Force refresh of raw downloads.")
+    p_ds_run.add_argument("--continue-on-error", action="store_true", help="Continue after failures.")
+    p_ds_run.add_argument("--report", action="store_true", help="Export executed HTML report per run.")
+    p_ds_run.add_argument("--evaluate", action="store_true", help="Write evaluation_metrics.json per run.")
+    p_ds_run.add_argument("--evaluate-seed", type=int, default=42)
+    p_ds_run.add_argument("--evaluate-min-label-rows", type=int, default=40, metavar="N")
+    p_ds_run.add_argument("--evaluate-min-dated-rows", type=int, default=50, metavar="N")
+    p_ds_run.set_defaults(func=cmd_dataset_run)
 
     p_list = sub.add_parser(
         "list-runs",
