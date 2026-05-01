@@ -42,6 +42,11 @@ _DEFAULTS: dict[str, Any] = {
     "clinvar_esearch_term": "TP53[gene]",
     "output_basename": "tp53",
     "alphafold_fragment": "F1",
+    "preferred_transcript_prefix": None,
+    "uniprot_residue_offset": 0,
+    "analysis_region_label": None,
+    "analysis_region_start": None,
+    "analysis_region_end": None,
 }
 
 
@@ -52,4 +57,13 @@ def load_config() -> dict[str, Any]:
         if not isinstance(user, dict):
             raise ValueError(f"{CONFIG_PATH} must contain a JSON object.")
         cfg.update(user)
+    for k in ("uniprot_residue_offset", "analysis_region_start", "analysis_region_end"):
+        v = cfg.get(k)
+        if v is not None and v != "":
+            try:
+                cfg[k] = int(v)
+            except (TypeError, ValueError):
+                cfg[k] = _DEFAULTS.get(k)
+        elif v == "":
+            cfg[k] = _DEFAULTS.get(k)
     return cfg

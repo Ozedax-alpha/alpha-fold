@@ -25,6 +25,7 @@ def artifact_paths(cfg: dict[str, Any], data_dir: Path) -> dict[str, Path]:
         "variants_basic_csv": proc / f"{base}_variants_basic.csv",
         "missense_mappable_csv": proc / f"{base}_missense_mappable.csv",
         "repro_manifest": proc / f"repro_manifest_{safe_base}.json",
+        "evaluation_metrics_json": proc / "evaluation_metrics.json",
     }
 
 
@@ -40,5 +41,6 @@ def format_paths_summary(cfg: dict[str, Any], data_dir: Path) -> str:
         f"  Variants CSV:             {art['variants_basic_csv'].name}",
         f"  Missense CSV:             {art['missense_mappable_csv'].name}",
         f"  Repro manifest (--trail): {art['repro_manifest'].name}",
+        f"  Evaluation metrics:       {art['evaluation_metrics_json'].name} (from `avi evaluate`)",
     ]
     return "\n".join(lines)

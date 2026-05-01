@@ -103,7 +103,7 @@ def _fetch_uniprot_gene_symbol(uniprot_id: str) -> str | None:
     return None
 
 
-def _preset_config(preset: str) -> dict[str, str]:
+def _preset_config(preset: str) -> dict[str, Any]:
     key = str(preset).strip()
     if not key:
         raise SystemExit("Empty preset name.")
@@ -112,7 +112,7 @@ def _preset_config(preset: str) -> dict[str, str]:
     if not isinstance(entry, dict):
         avail = ", ".join(sorted(doc))
         raise SystemExit(f"Unknown preset {key!r}. Known: {avail}")
-    out = {str(k): str(v) for k, v in entry.items()}
+    out: dict[str, Any] = {str(k): v for k, v in entry.items()}
     required = (
         "uniprot_id",
         "gene_symbol",
@@ -120,7 +120,7 @@ def _preset_config(preset: str) -> dict[str, str]:
         "output_basename",
         "alphafold_fragment",
     )
-    missing = [k for k in required if k not in out or not str(out[k]).strip()]
+    missing = [k for k in required if k not in out or out[k] is None or not str(out[k]).strip()]
     if missing:
         raise SystemExit(f"Preset {key!r} missing keys: {missing}")
     return out
@@ -630,6 +630,10 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         f"  ENTREZ_EMAIL: {'set' if email else 'unset (optional, recommended for E-utilities)'}"
     )
     print(f"  NCBI_API_KEY: {'set' if key else 'unset (optional)'}")
+    hc = os.environ.get("AVI_USE_HTTP_CACHE", "")
+    print(
+        f"  AVI_USE_HTTP_CACHE: {hc!r} (set to 1 + pip install '.[cache]' for on-disk HTTP cache)"
+    )
 
     runs = BASE_DIR / "runs"
     try:
@@ -859,6 +863,15 @@ def cmd_batch(ns: argparse.Namespace) -> int:
     batch_out.write_text(json.dumps(status, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"Wrote {batch_out}")
 
+    failed = [r for r in status["results"] if int(r.get("return_code") or 0) != 0]
+    if failed:
+        print(f"Batch finished with {len(failed)} failure(s) (see {batch_out.name}):")
+        for r in failed:
+            label = r.get("preset") or r.get("uniprot_id") or "?"
+            err = r.get("error") or ""
+            print(f"  {label!r} rc={r.get('return_code')} {r.get('run_dir')}")
+            if err:
+                print(f"    {err}")
     if any(r["return_code"] != 0 for r in status["results"]):
         raise SystemExit(1)
     return 0
@@ -901,6 +914,20 @@ def cmd_open_report(ns: argparse.Namespace) -> int:
     webbrowser.open(html.resolve().as_uri())
     print(f"Opened: {html}")
     return 0
+
+
+def cmd_evaluate(ns: argparse.Namespace) -> int:
+    run_dir = Path(ns.run_dir)
+    if not run_dir.is_absolute():
+        run_dir = (BASE_DIR / run_dir).resolve()
+    if not (run_dir / "pipeline_config.json").is_file():
+        raise SystemExit(f"Missing pipeline_config.json under {run_dir}")
+    return _run_script(
+        "evaluation_metrics.py",
+        ["--run-dir", str(run_dir)],
+        env=None,
+    )
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -1194,6 +1221,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run directory containing reports/exploration_report.html.",
     )
     p_open.set_defaults(func=cmd_open_report)
+
+    p_ev = sub.add_parser(
+        "evaluate",
+        help="Write held-out evaluation_metrics.json (path vs benign on structure features).",
+    )
+    p_ev.add_argument(
+        "--run-dir",
+        required=True,
+        help="Run directory with data/processed/*_missense_mappable.csv.",
+    )
+    p_ev.set_defaults(func=cmd_evaluate)
 
     p_list = sub.add_parser(
         "list-runs",

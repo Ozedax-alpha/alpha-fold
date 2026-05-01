@@ -15,7 +15,7 @@ import time
 
 import requests
 
-from pipeline_runtime import RAW_DIR, load_config
+from pipeline_runtime import BASE_DIR, RAW_DIR, load_config
 
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -34,7 +34,33 @@ EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 TOOL = "alphafold-variant-interpretation"
 ESEARCH_TERM = str(_CFG["clinvar_esearch_term"])
 ESUMMARY_BATCH = 200
-REQUEST_PAUSE_SEC = 0.35  # stay under ~3 req/s without an API key
+
+
+def _eutils_pause_sec() -> float:
+    """NCBI allows ~10 req/s with an API key; without a key stay ~3 req/s."""
+    return 0.11 if os.environ.get("NCBI_API_KEY") else 0.34
+
+
+def _http_session() -> requests.Session:
+    """Optional disk cache when ``AVI_USE_HTTP_CACHE=1`` and ``requests-cache`` is installed."""
+    flag = os.environ.get("AVI_USE_HTTP_CACHE", "").strip().lower()
+    if flag in ("1", "true", "yes"):
+        try:
+            import requests_cache  # type: ignore[import-untyped]
+
+            cache_dir = BASE_DIR / ".cache" / "avi-http"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            return requests_cache.CachedSession(
+                str(cache_dir),
+                expire_after=86400,
+                allowable_methods=("GET", "HEAD"),
+            )
+        except ImportError:
+            print(
+                "Warning: AVI_USE_HTTP_CACHE is set but requests-cache is not installed; "
+                "using a normal session (pip install requests-cache)."
+            )
+    return requests.Session()
 
 
 def _eutils_params(extra: dict) -> dict:
@@ -48,13 +74,16 @@ def _eutils_params(extra: dict) -> dict:
     return params
 
 
-def download_alphafold_structure() -> None:
-    if AFDB_OUT.exists():
-        print(f"AlphaFold structure already exists at {AFDB_OUT}")
-        return
-    print(f"Resolving AlphaFold PDB URL for {UNIPROT_ID} ({AF_ENTRY_ID})...")
-    meta = requests.get(AF_PREDICTION_API, timeout=60)
-    meta.raise_for_status()
+def _fetch_alphafold_prediction_entry(session: requests.Session) -> dict:
+    print(f"Resolving AlphaFold metadata for {UNIPROT_ID} ({AF_ENTRY_ID})...")
+    try:
+        meta = session.get(AF_PREDICTION_API, timeout=60)
+        meta.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(
+            f"AlphaFold API request failed ({AF_PREDICTION_API}): {e}\n"
+            "Check network connectivity and that the UniProt accession is valid."
+        ) from e
     predictions = meta.json()
     if not isinstance(predictions, list):
         raise RuntimeError("Unexpected AlphaFold API response (expected a JSON list).")
@@ -69,15 +98,52 @@ def download_alphafold_structure() -> None:
         raise RuntimeError(
             f"Could not find canonical entry {AF_ENTRY_ID} in AlphaFold API response."
         )
+    return chosen
+
+
+def download_alphafold_structure(chosen: dict, session: requests.Session) -> None:
+    if AFDB_OUT.exists():
+        print(f"AlphaFold structure already exists at {AFDB_OUT}")
+        return
     pdb_url = chosen.get("pdbUrl")
     if not pdb_url:
         raise RuntimeError("AlphaFold API record has no pdbUrl.")
     ver = chosen.get("latestVersion", "?")
     print(f"Downloading AlphaFold PDB (model version {ver})...")
-    resp = requests.get(pdb_url, timeout=120)
-    resp.raise_for_status()
+    try:
+        resp = session.get(str(pdb_url), timeout=120)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(
+            f"Failed to download AlphaFold PDB from {pdb_url!r}: {e}"
+        ) from e
     AFDB_OUT.write_bytes(resp.content)
     print(f"Saved AlphaFold PDB to {AFDB_OUT}")
+
+
+def download_alphafold_confidence_json(chosen: dict, session: requests.Session) -> None:
+    """Per-residue pLDDT / confidence categories (matches build_missense_subset glob)."""
+    url = chosen.get("plddtDocUrl")
+    if not url:
+        print("AlphaFold response has no plddtDocUrl; skipping confidence JSON download.")
+        return
+    url_s = str(url).rstrip("/")
+    name = url_s.split("/")[-1]
+    out = RAW_DIR / name
+    if out.exists():
+        print(f"AlphaFold confidence JSON already exists at {out}")
+        return
+    print(f"Downloading AlphaFold confidence JSON ({name})...")
+    try:
+        r = session.get(url_s, timeout=120)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(
+            f"Failed to download confidence JSON from {url_s!r}: {e}\n"
+            "The PDB is still usable; missense subset will omit pLDDT columns."
+        ) from e
+    out.write_bytes(r.content)
+    print(f"Saved confidence JSON to {out}")
 
 
 def _esearch_clinvar_tp53_ids(session: requests.Session) -> list[str]:
@@ -89,8 +155,14 @@ def _esearch_clinvar_tp53_ids(session: requests.Session) -> list[str]:
             "retmode": "json",
         }
     )
-    r = session.get(f"{EUTILS_BASE}/esearch.fcgi", params=params, timeout=60)
-    r.raise_for_status()
+    try:
+        r = session.get(f"{EUTILS_BASE}/esearch.fcgi", params=params, timeout=60)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(
+            f"ClinVar ESearch failed for term {ESEARCH_TERM!r}: {e}\n"
+            "Set ENTREZ_EMAIL (and optionally NCBI_API_KEY) per NCBI guidelines, then retry."
+        ) from e
     data = r.json()
     idlist = data.get("esearchresult", {}).get("idlist", [])
     if not idlist:
@@ -108,8 +180,14 @@ def _esummary_batch(
             "retmode": "json",
         }
     )
-    r = session.get(f"{EUTILS_BASE}/esummary.fcgi", params=params, timeout=120)
-    r.raise_for_status()
+    try:
+        r = session.get(f"{EUTILS_BASE}/esummary.fcgi", params=params, timeout=120)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(
+            f"ClinVar ESummary batch failed for {len(ids)} ids: {e}\n"
+            "If this is intermittent, retry; otherwise verify NCBI status and credentials."
+        ) from e
     payload = r.json()
     result = payload.get("result", {})
     uids = result.get("uids", [])
@@ -121,18 +199,19 @@ def _esummary_batch(
     return out
 
 
-def download_clinvar_tp53() -> None:
+def download_clinvar_tp53(session: requests.Session) -> None:
     if CLINVAR_OUT.exists():
         print(f"ClinVar TP53 data already exists at {CLINVAR_OUT}")
         return
     print(f"Downloading ClinVar records ({ESEARCH_TERM}) via E-utilities...")
-    with requests.Session() as session:
-        ids = _esearch_clinvar_tp53_ids(session)
-        summaries: dict[str, dict] = {}
-        for i in range(0, len(ids), ESUMMARY_BATCH):
-            batch = ids[i : i + ESUMMARY_BATCH]
-            summaries.update(_esummary_batch(session, batch))
-            time.sleep(REQUEST_PAUSE_SEC)
+    pause = _eutils_pause_sec()
+    ids = _esearch_clinvar_tp53_ids(session)
+    time.sleep(pause)
+    summaries: dict[str, dict] = {}
+    for i in range(0, len(ids), ESUMMARY_BATCH):
+        batch = ids[i : i + ESUMMARY_BATCH]
+        summaries.update(_esummary_batch(session, batch))
+        time.sleep(pause)
     doc = {
         "source": "ncbi_eutils_esummary",
         "db": "clinvar",
@@ -160,9 +239,18 @@ def main() -> None:
         if CLINVAR_OUT.exists():
             CLINVAR_OUT.unlink()
             print(f"Removed existing {CLINVAR_OUT} (--force)")
+        for extra in RAW_DIR.glob(f"AF-{UNIPROT_ID}-{_FRAG}-confidence*.json"):
+            extra.unlink()
+            print(f"Removed existing {extra} (--force)")
 
-    download_alphafold_structure()
-    download_clinvar_tp53()
+    http = _http_session()
+    try:
+        chosen = _fetch_alphafold_prediction_entry(http)
+        download_alphafold_structure(chosen, http)
+        download_alphafold_confidence_json(chosen, http)
+        download_clinvar_tp53(http)
+    finally:
+        http.close()
     print("Done.")
 
 

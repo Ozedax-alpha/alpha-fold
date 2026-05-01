@@ -1,18 +1,19 @@
 """
 Parse ClinVar JSON from download_tp53_data.py, extract variant features, and map
-protein positions to AlphaFold residue indices (UniProt P04637 numbering).
+protein positions to AlphaFold residue indices (UniProt numbering + optional offset).
 """
 
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pandas as pd
 from Bio.PDB import PDBParser
 
 from pipeline_runtime import PROCESSED_DIR, RAW_DIR, load_config
+from variant_metadata import clinical_significance_bucket, hgvs_protein_short
+from variant_parse import germline_date_last_evaluated, resolve_missense_position
 
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -24,64 +25,35 @@ PDB_PATH = RAW_DIR / f"AF-{UNIPROT_ID}-{_FRAG}-alphafold.pdb"
 CLINVAR_JSON = RAW_DIR / f"clinvar_{_OUT_BASE}_variants.json"
 OUT_CSV = PROCESSED_DIR / f"{_OUT_BASE}_variants_basic.csv"
 
-THREE_TO_ONE = {
-    "Ala": "A",
-    "Arg": "R",
-    "Asn": "N",
-    "Asp": "D",
-    "Cys": "C",
-    "Gln": "Q",
-    "Glu": "E",
-    "Gly": "G",
-    "His": "H",
-    "Ile": "I",
-    "Leu": "L",
-    "Lys": "K",
-    "Met": "M",
-    "Phe": "F",
-    "Pro": "P",
-    "Ser": "S",
-    "Thr": "T",
-    "Trp": "W",
-    "Tyr": "Y",
-    "Val": "V",
-    "Ter": "*",
-    "Sec": "U",
-}
+
+def _offset(cfg: dict) -> int:
+    v = cfg.get("uniprot_residue_offset")
+    try:
+        return int(v) if v is not None and str(v).strip() != "" else 0
+    except (TypeError, ValueError):
+        return 0
 
 
-def _parse_protein_change_short(text: str) -> tuple[str | None, int | None, str | None]:
-    """
-    NCBI esummary often uses protein_change like 'R175H' or 'S15I'.
-    """
-    if not text or not isinstance(text, str):
-        return None, None, None
-    text = text.strip()
-    m = re.match(r"^([A-Za-z*?])(\d+)([A-Za-z*?])$", text)
-    if not m:
-        return None, None, None
-    ref, pos_s, alt = m.group(1).upper(), m.group(2), m.group(3).upper()
-    return ref, int(pos_s), alt
+def _preferred_transcript(cfg: dict) -> str | None:
+    p = cfg.get("preferred_transcript_prefix")
+    if p is None or (isinstance(p, str) and not p.strip()):
+        return None
+    return str(p).strip()
 
 
-def _parse_protein_paren_hgvs(text: str) -> tuple[str | None, int | None, str | None]:
-    """
-    Extract p.Leu123Arg from strings like 'NM_000546.6(TP53):c.123A>G (p.Leu123Arg)'.
-    """
-    if not text:
-        return None, None, None
-    m = re.search(
-        r"\(p\.([A-Za-z]{3})(\d+)([A-Za-z]{3}|\*)\)",
-        text,
-    )
-    if not m:
-        return None, None, None
-    ref3, pos_s, alt3 = m.group(1), m.group(2), m.group(3)
-    ref = THREE_TO_ONE.get(ref3)
-    alt = THREE_TO_ONE.get(alt3) if alt3 != "*" else "*"
-    if ref is None or alt is None:
-        return None, None, None
-    return ref, int(pos_s), alt
+def load_alphafold_residue_ids(pdb_path: Path) -> set[int]:
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("af", str(pdb_path))
+    ids: set[int] = set()
+    for model in structure:
+        for chain in model:
+            for residue in chain:
+                if residue.id[0] != " ":
+                    continue
+                resseq = residue.id[1]
+                if isinstance(resseq, int):
+                    ids.add(resseq)
+    return ids
 
 
 def _grch38_loc(variation_set: list) -> tuple[str | None, str | None, str | None]:
@@ -105,23 +77,13 @@ def _clinical_significance(rec: dict) -> str | None:
     return None
 
 
-def load_alphafold_residue_ids(pdb_path: Path) -> set[int]:
-    parser = PDBParser(QUIET=True)
-    structure = parser.get_structure("tp53", str(pdb_path))
-    ids: set[int] = set()
-    for model in structure:
-        for chain in model:
-            for residue in chain:
-                if residue.id[0] != " ":
-                    continue
-                resseq = residue.id[1]
-                if isinstance(resseq, int):
-                    ids.add(resseq)
-    return ids
-
-
-def iter_variant_rows(summaries: dict[str, dict]) -> list[dict]:
+def iter_variant_rows(
+    summaries: dict[str, dict], *, cfg: dict, af_residues: set[int]
+) -> list[dict]:
     rows: list[dict] = []
+    pref = _preferred_transcript(cfg)
+    off = _offset(cfg)
+
     for uid, rec in summaries.items():
         if not isinstance(rec, dict):
             continue
@@ -133,13 +95,23 @@ def iter_variant_rows(summaries: dict[str, dict]) -> list[dict]:
         protein_change = (rec.get("protein_change") or "").strip()
         chr38, start38, stop38 = _grch38_loc(vset)
         sig = _clinical_significance(rec)
+        gdate = germline_date_last_evaluated(rec)
 
-        ref, pos, alt = _parse_protein_change_short(protein_change)
-        if pos is None:
-            ref, pos, alt = _parse_protein_paren_hgvs(variation_name)
+        ref, pos, alt = resolve_missense_position(
+            protein_change_field=protein_change,
+            variation_name=str(variation_name),
+            preferred_transcript_prefix=pref,
+        )
 
         mol_cons = rec.get("molecular_consequence_list") or []
         mol_cons_str = ";".join(mol_cons) if isinstance(mol_cons, list) else ""
+
+        hgvs_short = hgvs_protein_short(ref, pos, alt)
+        model_res = int(pos) + off if pos is not None else None
+        in_af = model_res in af_residues if model_res is not None else False
+        mapping_note = None
+        if pos is not None and model_res is not None and not in_af:
+            mapping_note = "model_residue_not_in_alphafold_pdb"
 
         rows.append(
             {
@@ -150,12 +122,17 @@ def iter_variant_rows(summaries: dict[str, dict]) -> list[dict]:
                 "grch38_start": start38,
                 "grch38_stop": stop38,
                 "clinical_significance": sig,
+                "clinical_significance_bucket": clinical_significance_bucket(sig),
+                "germline_date_last_evaluated": gdate,
                 "variant_type": first.get("variant_type"),
                 "molecular_consequence": mol_cons_str,
                 "protein_ref": ref,
                 "protein_position": pos,
                 "protein_alt": alt,
                 "protein_change_field": protein_change or None,
+                "hgvs_protein_short": hgvs_short,
+                "model_residue_index": model_res,
+                "mapping_note": mapping_note,
             }
         )
     return rows
@@ -164,11 +141,15 @@ def iter_variant_rows(summaries: dict[str, dict]) -> list[dict]:
 def main() -> None:
     if not CLINVAR_JSON.is_file():
         raise FileNotFoundError(
-            f"Missing {CLINVAR_JSON}. Run scripts/download_tp53_data.py first."
+            f"Missing ClinVar JSON at {CLINVAR_JSON}.\n"
+            "Fix: run the download stage first, e.g.\n"
+            "  py -3 -m avi run --run-dir <run-dir> --stage download\n"
+            "or: python scripts/download_tp53_data.py"
         )
     if not PDB_PATH.is_file():
         raise FileNotFoundError(
-            f"Missing {PDB_PATH}. Run scripts/download_tp53_data.py first."
+            f"Missing AlphaFold PDB at {PDB_PATH}.\n"
+            "Fix: run the download stage first (same as ClinVar), with network access."
         )
 
     doc = json.loads(CLINVAR_JSON.read_text(encoding="utf-8"))
@@ -176,12 +157,13 @@ def main() -> None:
     if not isinstance(summaries, dict):
         raise ValueError("Expected top-level 'summaries' object in ClinVar JSON.")
 
+    cfg = load_config()
     af_residues = load_alphafold_residue_ids(PDB_PATH)
-    rows = iter_variant_rows(summaries)
+    rows = iter_variant_rows(summaries, cfg=cfg, af_residues=af_residues)
     df = pd.DataFrame(rows)
 
-    df["alphafold_residue_index"] = df["protein_position"]
-    df["in_alphafold_structure"] = df["protein_position"].apply(
+    df["alphafold_residue_index"] = df["model_residue_index"]
+    df["in_alphafold_structure"] = df["model_residue_index"].apply(
         lambda p: int(p) in af_residues if pd.notna(p) else False
     )
 

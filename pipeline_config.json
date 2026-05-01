@@ -3,5 +3,10 @@
   "gene_symbol": "TP53",
   "clinvar_esearch_term": "TP53[gene]",
   "output_basename": "tp53",
-  "alphafold_fragment": "F1"
+  "alphafold_fragment": "F1",
+  "preferred_transcript_prefix": "NM_000546",
+  "uniprot_residue_offset": 0,
+  "analysis_region_label": "TP53 DNA-binding domain (approx. UniProt 102-292)",
+  "analysis_region_start": 102,
+  "analysis_region_end": 292
 }
