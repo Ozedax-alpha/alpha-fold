@@ -18,6 +18,8 @@ from typing import Any
 
 from avi.paths import artifact_paths, default_config_path, format_paths_summary
 from avi.pipeline import STAGE_ORDER, StageContext, run_stages
+from avi import db as avi_db
+from avi import webui as avi_webui
 
 try:
     import requests  # type: ignore
@@ -28,6 +30,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS = BASE_DIR / "scripts"
 NOTEBOOK_PATH = BASE_DIR / "notebooks" / "01_target_exploration.ipynb"
 PRESETS_PATH = Path(__file__).with_name("presets.json")
+DEFAULT_DB_PATH = avi_db.default_db_path(BASE_DIR)
 
 
 def _run_script(name: str, extra: list[str], *, env: dict[str, str] | None = None) -> int:
@@ -963,6 +966,144 @@ def cmd_evaluate(ns: argparse.Namespace) -> int:
     return _run_script("evaluation_metrics.py", extra, env=None)
 
 
+def cmd_db_init(ns: argparse.Namespace) -> int:
+    db_path = Path(ns.db)
+    if not db_path.is_absolute():
+        db_path = (BASE_DIR / db_path).resolve()
+    con = avi_db.connect(db_path)
+    try:
+        avi_db.init_db(con)
+    finally:
+        con.close()
+    print(f"Initialized DB: {db_path}")
+    return 0
+
+
+def cmd_db_import_presets(ns: argparse.Namespace) -> int:
+    db_path = Path(ns.db)
+    if not db_path.is_absolute():
+        db_path = (BASE_DIR / db_path).resolve()
+    presets = _load_presets()
+    if not presets:
+        raise SystemExit(f"No presets found in {PRESETS_PATH}")
+    con = avi_db.connect(db_path)
+    try:
+        avi_db.init_db(con)
+        n = 0
+        for key, cfg in presets.items():
+            avi_db.upsert_protein(
+                con,
+                preset_key=key,
+                uniprot_id=str(cfg.get("uniprot_id") or "").strip(),
+                gene_symbol=str(cfg.get("gene_symbol") or "").strip() or None,
+                clinvar_esearch_term=str(cfg.get("clinvar_esearch_term") or "").strip() or None,
+                output_basename=str(cfg.get("output_basename") or "").strip() or None,
+                alphafold_fragment=str(cfg.get("alphafold_fragment") or "").strip() or None,
+                synonyms=None,
+            )
+            n += 1
+    finally:
+        con.close()
+    print(f"Imported {n} protein(s) from presets into {db_path.name}")
+    return 0
+
+
+def cmd_db_index_runs(ns: argparse.Namespace) -> int:
+    db_path = Path(ns.db)
+    if not db_path.is_absolute():
+        db_path = (BASE_DIR / db_path).resolve()
+    runs_root = Path(ns.runs_root)
+    if not runs_root.is_absolute():
+        runs_root = (BASE_DIR / runs_root).resolve()
+
+    con = avi_db.connect(db_path)
+    try:
+        avi_db.init_db(con)
+        indexed = 0
+        for run_dir in avi_db.iter_run_dirs(runs_root):
+            cfg_path = run_dir / "pipeline_config.json"
+            if not cfg_path.is_file():
+                continue
+            try:
+                cfg = _load_json(cfg_path)
+            except Exception:
+                continue
+
+            # Ensure protein row exists.
+            preset_key = None
+            # When indexing run dirs (not presets), we don't necessarily know the preset key.
+            pid = avi_db.upsert_protein(
+                con,
+                preset_key=preset_key,
+                uniprot_id=str(cfg.get("uniprot_id") or "").strip(),
+                gene_symbol=str(cfg.get("gene_symbol") or "").strip() or None,
+                clinvar_esearch_term=str(cfg.get("clinvar_esearch_term") or "").strip() or None,
+                output_basename=str(cfg.get("output_basename") or "").strip() or None,
+                alphafold_fragment=str(cfg.get("alphafold_fragment") or "").strip() or None,
+                synonyms=None,
+            )
+
+            # Artifacts.
+            data_root = run_dir / "data"
+            art = artifact_paths(cfg, data_root)
+            report_html = run_dir / "reports" / "exploration_report.html"
+            eval_json = art.get("evaluation_metrics_json")
+            eval_exists = eval_json.is_file() if isinstance(eval_json, Path) else False
+            status = "ok"
+            err = None
+
+            # Created timestamp (best effort).
+            created_utc = None
+            run_meta = run_dir / "run.json"
+            if run_meta.is_file():
+                try:
+                    rj = json.loads(run_meta.read_text(encoding="utf-8-sig"))
+                    if isinstance(rj, dict) and isinstance(rj.get("created_utc"), str):
+                        created_utc = str(rj["created_utc"])
+                except Exception:
+                    pass
+
+            run_id = avi_db.upsert_run(
+                con,
+                run_dir=run_dir,
+                protein_id=pid,
+                created_utc=created_utc,
+                status=status,
+                report_html_path=report_html if report_html.is_file() else None,
+                evaluation_json_path=eval_json if eval_exists else None,
+                error=err,
+            )
+            if eval_exists:
+                try:
+                    doc = json.loads(Path(eval_json).read_text(encoding="utf-8-sig"))
+                    if isinstance(doc, dict):
+                        avi_db.upsert_run_metrics(con, run_id=run_id, metrics=doc)
+                except Exception:
+                    pass
+            indexed += 1
+    finally:
+        con.close()
+    print(f"Indexed {indexed} run dir(s) under {runs_root}")
+    return 0
+
+
+def cmd_ui(ns: argparse.Namespace) -> int:
+    db_path = Path(ns.db)
+    if not db_path.is_absolute():
+        db_path = (BASE_DIR / db_path).resolve()
+    con = avi_db.connect(db_path)
+    try:
+        avi_db.init_db(con)
+    finally:
+        con.close()
+    if getattr(ns, "open", False):
+        try:
+            webbrowser.open(f"http://{ns.host}:{int(ns.port)}/")
+        except Exception:
+            pass
+    avi_webui.serve(base_dir=BASE_DIR, db_path=db_path, host=str(ns.host), port=int(ns.port))
+    return 0
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="avi",
@@ -1311,6 +1452,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum parseable germline_date_last_evaluated rows to use time-based split.",
     )
     p_ev.set_defaults(func=cmd_evaluate)
+
+    p_db = sub.add_parser("db", help="SQLite index for proteins/runs (for UI/search).")
+    dbsub = p_db.add_subparsers(dest="db_cmd", required=True)
+    p_db_init = dbsub.add_parser("init", help="Create/initialize the SQLite database.")
+    p_db_init.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to avi.db (default: ./avi.db).")
+    p_db_init.set_defaults(func=cmd_db_init)
+
+    p_db_imp = dbsub.add_parser("import-presets", help="Import avi/presets.json into the DB.")
+    p_db_imp.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to avi.db (default: ./avi.db).")
+    p_db_imp.set_defaults(func=cmd_db_import_presets)
+
+    p_db_idx = dbsub.add_parser("index-runs", help="Index existing run directories into the DB.")
+    p_db_idx.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to avi.db (default: ./avi.db).")
+    p_db_idx.add_argument("--runs-root", default="runs", help="Runs root directory to scan (default: runs).")
+    p_db_idx.set_defaults(func=cmd_db_index_runs)
+
+    p_ui = sub.add_parser("ui", help="Start local search UI (reads avi.db).")
+    p_ui.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to avi.db (default: ./avi.db).")
+    p_ui.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1).")
+    p_ui.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000).")
+    p_ui.add_argument("--open", action="store_true", help="Open the UI in your browser.")
+    p_ui.set_defaults(func=cmd_ui)
 
     p_list = sub.add_parser(
         "list-runs",

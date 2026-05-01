@@ -8,6 +8,7 @@ runs_smoke/
 runs_batch_smoke/
 runs_batch_eval_smoke/
 runs_smoke_synth/
+avi.db
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
