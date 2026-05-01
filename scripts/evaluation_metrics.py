@@ -11,20 +11,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+from variant_parse import parse_clinvar_last_evaluated_tokens
+
 
 def _parse_eval_date(s: str) -> tuple[int, int, int] | None:
-    if not isinstance(s, str) or not s.strip():
-        return None
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", s.strip())
-    if not m:
-        return None
-    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+    return parse_clinvar_last_evaluated_tokens(s)
 
 
 def _date_key(t: tuple[int, int, int] | None) -> int:

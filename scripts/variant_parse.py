@@ -159,12 +159,37 @@ def resolve_missense_position(
     return None, None, None
 
 
+def parse_clinvar_last_evaluated_tokens(s: str) -> tuple[int, int, int] | None:
+    """
+    Parse ClinVar esummary date strings to a calendar day.
+
+    NCBI often returns ``2026/01/15 00:00``; we also accept ISO ``2026-01-15``.
+    """
+    if not isinstance(s, str) or not s.strip():
+        return None
+    t = s.strip()
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", t)
+    if not m:
+        m = re.match(r"^(\d{4})/(\d{2})/(\d{2})", t)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
 def germline_date_last_evaluated(rec: dict[str, Any]) -> str | None:
     g = rec.get("germline_classification")
     if not isinstance(g, dict):
         return None
+    raw: str | None = None
     for key in ("date_last_evaluated", "last_evaluated", "review_date"):
         v = g.get(key)
         if isinstance(v, str) and v.strip():
-            return v.strip()
-    return None
+            raw = v.strip()
+            break
+    if not raw:
+        return None
+    tok = parse_clinvar_last_evaluated_tokens(raw)
+    if tok is None:
+        return None
+    y, mo, d = tok
+    return f"{y:04d}-{mo:02d}-{d:02d}"
