@@ -27,6 +27,10 @@ py -3 -m avi batch --presets tp53,brca1,insulin --report --evaluate --continue-o
 py -3 -m avi batch --presets insulin --report --evaluate --evaluate-min-label-rows 30 --continue-on-error
 py -3 -m avi add-preset brca1 --from-uniprot P38398 --auto --overwrite
 py -3 -m avi batch --from-uniprot P04637,P38398 --continue-on-error
+py -3 -m avi db init
+py -3 -m avi db import-manifest --manifest data/proteins_manifest_example.csv
+py -3 -m avi db index-runs --runs-root runs
+py -3 -m avi ui --open
 ```
 
 Notes:

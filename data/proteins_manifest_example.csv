@@ -1,0 +1,4 @@
+preset_key,uniprot_id,gene_symbol,clinvar_esearch_term,output_basename,alphafold_fragment,synonyms
+tp53,P04637,TP53,"TP53[gene]",tp53,F1,"tumor protein p53;p53"
+brca1,P38398,BRCA1,"BRCA1[gene]",brca1,F1,"breast cancer type 1 susceptibility protein"
+hbb,P68871,HBB,"HBB[gene]",hbb,F1,"beta-globin;hemoglobin subunit beta"

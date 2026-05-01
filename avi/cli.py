@@ -1008,6 +1008,55 @@ def cmd_db_import_presets(ns: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_db_import_manifest(ns: argparse.Namespace) -> int:
+    import csv
+
+    db_path = Path(ns.db)
+    if not db_path.is_absolute():
+        db_path = (BASE_DIR / db_path).resolve()
+    manifest = Path(ns.manifest)
+    if not manifest.is_absolute():
+        manifest = (BASE_DIR / manifest).resolve()
+    if not manifest.is_file():
+        raise SystemExit(f"Manifest not found: {manifest}")
+
+    delim = "\t" if manifest.suffix.lower() in (".tsv",) else ","
+    con = avi_db.connect(db_path)
+    try:
+        avi_db.init_db(con)
+        with manifest.open("r", encoding="utf-8-sig", newline="") as f:
+            rdr = csv.DictReader(f, delimiter=delim)
+            if rdr.fieldnames is None:
+                raise SystemExit("Manifest has no header row.")
+            n = 0
+            for row in rdr:
+                uid = str(row.get("uniprot_id") or "").strip()
+                if not uid:
+                    continue
+                preset_key = str(row.get("preset_key") or "").strip() or None
+                gene = str(row.get("gene_symbol") or "").strip() or None
+                clin = str(row.get("clinvar_esearch_term") or "").strip() or None
+                outb = str(row.get("output_basename") or "").strip() or None
+                frag = str(row.get("alphafold_fragment") or "").strip() or None
+                syn = str(row.get("synonyms") or "").strip()
+                synonyms = [s.strip() for s in syn.split(";") if s.strip()] if syn else None
+                avi_db.upsert_protein(
+                    con,
+                    preset_key=preset_key,
+                    uniprot_id=uid,
+                    gene_symbol=gene,
+                    clinvar_esearch_term=clin,
+                    output_basename=outb,
+                    alphafold_fragment=frag,
+                    synonyms=synonyms,
+                )
+                n += 1
+    finally:
+        con.close()
+    print(f"Imported {n} protein(s) from manifest into {db_path.name}")
+    return 0
+
+
 def cmd_db_index_runs(ns: argparse.Namespace) -> int:
     db_path = Path(ns.db)
     if not db_path.is_absolute():
@@ -1462,6 +1511,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_db_imp = dbsub.add_parser("import-presets", help="Import avi/presets.json into the DB.")
     p_db_imp.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to avi.db (default: ./avi.db).")
     p_db_imp.set_defaults(func=cmd_db_import_presets)
+
+    p_db_m = dbsub.add_parser("import-manifest", help="Import a proteins manifest CSV/TSV into the DB.")
+    p_db_m.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to avi.db (default: ./avi.db).")
+    p_db_m.add_argument(
+        "--manifest",
+        required=True,
+        help="CSV/TSV with header: uniprot_id (required), gene_symbol, preset_key, clinvar_esearch_term, output_basename, alphafold_fragment, synonyms (semicolon-separated).",
+    )
+    p_db_m.set_defaults(func=cmd_db_import_manifest)
 
     p_db_idx = dbsub.add_parser("index-runs", help="Index existing run directories into the DB.")
     p_db_idx.add_argument("--db", default=str(DEFAULT_DB_PATH), help="Path to avi.db (default: ./avi.db).")

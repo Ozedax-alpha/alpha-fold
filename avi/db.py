@@ -50,6 +50,7 @@ def init_db(con: sqlite3.Connection) -> None:
           output_basename TEXT,
           alphafold_fragment TEXT,
           synonyms_json TEXT NOT NULL DEFAULT '[]',
+          synonyms_text TEXT NOT NULL DEFAULT '',
           created_utc TEXT NOT NULL,
           updated_utc TEXT NOT NULL
         );
@@ -91,6 +92,12 @@ def init_db(con: sqlite3.Connection) -> None:
     )
     con.commit()
 
+    # Lightweight "migration" for older DBs: ensure synonyms_text exists.
+    cols = {r[1] for r in con.execute("PRAGMA table_info(proteins);").fetchall()}
+    if "synonyms_text" not in cols:
+        con.execute("ALTER TABLE proteins ADD COLUMN synonyms_text TEXT NOT NULL DEFAULT '';")
+        con.commit()
+
     # Best-effort FTS5: works on most modern Python builds; if missing, UI will fall back.
     try:
         con.execute(
@@ -109,17 +116,17 @@ def init_db(con: sqlite3.Connection) -> None:
             """
             CREATE TRIGGER IF NOT EXISTS proteins_ai AFTER INSERT ON proteins BEGIN
               INSERT INTO proteins_fts(rowid, preset_key, uniprot_id, gene_symbol, synonyms)
-              VALUES (new.id, new.preset_key, new.uniprot_id, new.gene_symbol, json_extract(new.synonyms_json, '$'));
+              VALUES (new.id, new.preset_key, new.uniprot_id, new.gene_symbol, new.synonyms_text);
             END;
             CREATE TRIGGER IF NOT EXISTS proteins_ad AFTER DELETE ON proteins BEGIN
               INSERT INTO proteins_fts(proteins_fts, rowid, preset_key, uniprot_id, gene_symbol, synonyms)
-              VALUES('delete', old.id, old.preset_key, old.uniprot_id, old.gene_symbol, json_extract(old.synonyms_json, '$'));
+              VALUES('delete', old.id, old.preset_key, old.uniprot_id, old.gene_symbol, old.synonyms_text);
             END;
             CREATE TRIGGER IF NOT EXISTS proteins_au AFTER UPDATE ON proteins BEGIN
               INSERT INTO proteins_fts(proteins_fts, rowid, preset_key, uniprot_id, gene_symbol, synonyms)
-              VALUES('delete', old.id, old.preset_key, old.uniprot_id, old.gene_symbol, json_extract(old.synonyms_json, '$'));
+              VALUES('delete', old.id, old.preset_key, old.uniprot_id, old.gene_symbol, old.synonyms_text);
               INSERT INTO proteins_fts(rowid, preset_key, uniprot_id, gene_symbol, synonyms)
-              VALUES (new.id, new.preset_key, new.uniprot_id, new.gene_symbol, json_extract(new.synonyms_json, '$'));
+              VALUES (new.id, new.preset_key, new.uniprot_id, new.gene_symbol, new.synonyms_text);
             END;
             """
         )
@@ -146,7 +153,9 @@ def upsert_protein(
 ) -> int:
     now = _now_utc()
     syn = synonyms or []
-    syn_json = json.dumps([s for s in syn if isinstance(s, str) and s.strip()], ensure_ascii=False)
+    syn_clean = [s.strip() for s in syn if isinstance(s, str) and s.strip()]
+    syn_json = json.dumps(syn_clean, ensure_ascii=False)
+    syn_text = " ".join(syn_clean)
 
     # If preset_key exists, use it as the stable unique key.
     if preset_key:
@@ -154,8 +163,8 @@ def upsert_protein(
             """
             INSERT INTO proteins(
               preset_key, uniprot_id, gene_symbol, clinvar_esearch_term, output_basename, alphafold_fragment,
-              synonyms_json, created_utc, updated_utc
-            ) VALUES(?,?,?,?,?,?,?,?,?)
+              synonyms_json, synonyms_text, created_utc, updated_utc
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(preset_key) DO UPDATE SET
               uniprot_id=excluded.uniprot_id,
               gene_symbol=excluded.gene_symbol,
@@ -163,6 +172,7 @@ def upsert_protein(
               output_basename=excluded.output_basename,
               alphafold_fragment=excluded.alphafold_fragment,
               synonyms_json=excluded.synonyms_json,
+              synonyms_text=excluded.synonyms_text,
               updated_utc=excluded.updated_utc;
             """,
             (
@@ -173,6 +183,7 @@ def upsert_protein(
                 output_basename,
                 alphafold_fragment,
                 syn_json,
+                syn_text,
                 now,
                 now,
             ),
@@ -187,7 +198,7 @@ def upsert_protein(
         """
         INSERT INTO proteins(
           preset_key, uniprot_id, gene_symbol, clinvar_esearch_term, output_basename, alphafold_fragment,
-          synonyms_json, created_utc, updated_utc
+          synonyms_json, synonyms_text, created_utc, updated_utc
         ) VALUES(NULL,?,?,?,?,?,?,?,?)
         ON CONFLICT(uniprot_id) DO UPDATE SET
           gene_symbol=excluded.gene_symbol,
@@ -195,6 +206,7 @@ def upsert_protein(
           output_basename=excluded.output_basename,
           alphafold_fragment=excluded.alphafold_fragment,
           synonyms_json=excluded.synonyms_json,
+          synonyms_text=excluded.synonyms_text,
           updated_utc=excluded.updated_utc;
         """,
         (
@@ -204,6 +216,7 @@ def upsert_protein(
             output_basename,
             alphafold_fragment,
             syn_json,
+            syn_text,
             now,
             now,
         ),
