@@ -132,6 +132,13 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--test-fraction", type=float, default=0.2)
     ap.add_argument(
+        "--min-label-rows",
+        type=int,
+        default=40,
+        metavar="N",
+        help="Minimum Path/LP + Ben/LB rows required to run evaluation.",
+    )
+    ap.add_argument(
         "--min-dated-rows",
         type=int,
         default=50,
@@ -173,7 +180,7 @@ def main() -> None:
     harm_mask = b.isin(["Pathogenic", "Likely pathogenic"])
     ben_mask = b.isin(["Benign", "Likely benign"])
     sub = df[harm_mask | ben_mask].copy()
-    if len(sub) < 40:
+    if len(sub) < int(args.min_label_rows):
         raise SystemExit(f"Too few path/benign rows for split: {len(sub)}")
 
     y = sub["clinical_significance_bucket"].isin(["Pathogenic", "Likely pathogenic"]).astype(int).to_numpy()

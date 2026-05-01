@@ -933,6 +933,8 @@ def cmd_evaluate(ns: argparse.Namespace) -> int:
         str(run_dir),
         "--seed",
         str(ns.seed),
+        "--min-label-rows",
+        str(ns.min_label_rows),
         "--min-dated-rows",
         str(ns.min_dated_rows),
     ]
@@ -1242,6 +1244,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run directory with data/processed/*_missense_mappable.csv.",
     )
     p_ev.add_argument("--seed", type=int, default=42, help="Stratified split RNG seed.")
+    p_ev.add_argument(
+        "--min-label-rows",
+        type=int,
+        default=40,
+        metavar="N",
+        help="Minimum Path/LP + Ben/LB rows required to run evaluation.",
+    )
     p_ev.add_argument(
         "--min-dated-rows",
         type=int,
