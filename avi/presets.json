@@ -33,5 +33,12 @@
     "alphafold_fragment": "F1",
     "preferred_transcript_prefix": "NM_007294",
     "uniprot_residue_offset": 0
+  },
+  "hbb": {
+    "uniprot_id": "P68871",
+    "gene_symbol": "HBB",
+    "clinvar_esearch_term": "HBB[gene]",
+    "output_basename": "hbb",
+    "alphafold_fragment": "F1"
   }
 }
