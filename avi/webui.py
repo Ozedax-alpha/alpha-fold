@@ -12,7 +12,7 @@ import socketserver
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, quote
 
 from avi import db as avi_db
 
@@ -32,6 +32,19 @@ button{padding:10px 12px;border-radius:10px;border:1px solid #2a355a;background:
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px}
 """
+
+def _is_under(child: Path, parent: Path) -> bool:
+    """
+    Robust "is child under parent" for Windows paths.
+
+    Path.is_relative_to can fail due to drive-letter casing / normalization mismatches.
+    """
+    try:
+        c = os.path.normcase(os.path.abspath(str(child)))
+        p = os.path.normcase(os.path.abspath(str(parent)))
+        return os.path.commonpath([c, p]) == p
+    except Exception:
+        return False
 
 
 def _page(title: str, body: str) -> bytes:
@@ -87,6 +100,11 @@ def _run_button(protein_id: int) -> str:
   <button type="submit">Run pipeline</button>
 </form>
 """
+
+
+def _quote_path(p: str) -> str:
+    # Encode Windows paths safely for query params.
+    return quote(p, safe="")
 
 
 def _metrics_summary(doc: dict[str, Any]) -> str:
@@ -180,11 +198,13 @@ class Handler(BaseHTTPRequestHandler):
                 report = r["report_html_path"]
                 report_link = ""
                 if report and Path(str(report)).is_file():
-                    report_link = f'<a class="pill" href="/file?path={html.escape(str(report))}">Open report HTML</a>'
+                    qp = _quote_path(str(report))
+                    report_link = f'<a class="pill" href="/file?path={qp}">Open report HTML</a>'
                 ev = r["evaluation_json_path"]
                 ev_link = ""
                 if ev and Path(str(ev)).is_file():
-                    ev_link = f'<a class="pill" href="/file?path={html.escape(str(ev))}">Open evaluation JSON</a>'
+                    qp = _quote_path(str(ev))
+                    ev_link = f'<a class="pill" href="/file?path={qp}">Open evaluation JSON</a>'
                 ms = _metrics_summary(metrics or {})
                 run_block = f"""
 <div class="card">
@@ -227,12 +247,9 @@ class Handler(BaseHTTPRequestHandler):
                 base / "runs_dataset",
                 base / "runs_dataset_smoke",
             ):
-                try:
-                    if target.is_relative_to(root.resolve()):  # py3.9+? (we're 3.11+)
-                        allowed = True
-                        break
-                except Exception:
-                    pass
+                if _is_under(target, root.resolve()):
+                    allowed = True
+                    break
             if not allowed:
                 self._send(403, _page("Forbidden", _topbar("") + '<div class="wrap"><div class="card">File not allowed.</div></div>'))
                 return
