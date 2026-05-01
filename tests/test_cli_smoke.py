@@ -74,6 +74,10 @@ def test_avi_gc_help():
     _run_help(["-m", "avi", "gc", "--help"])
 
 
+def test_avi_evaluate_help():
+    _run_help(["-m", "avi", "evaluate", "--help"])
+
+
 def test_notebook_file_present():
     nb = ROOT / "notebooks" / "01_tp53_exploration.ipynb"
     assert nb.is_file()
