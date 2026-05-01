@@ -60,3 +60,45 @@ def test_evaluation_metrics_script_writes_json(tmp_path: Path) -> None:
     assert "split_metadata" in doc
     assert doc["split_metadata"]["n_rows_with_parseable_germline_date"] == 120
     assert "alphafold_confidence_score" in doc["features"]
+
+
+def test_evaluation_metrics_handles_single_class(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run2"
+    proc = run_dir / "data" / "processed"
+    proc.mkdir(parents=True)
+    cfg = {
+        "uniprot_id": "P00000",
+        "gene_symbol": "TEST",
+        "clinvar_esearch_term": "TEST[gene]",
+        "output_basename": "syn",
+        "alphafold_fragment": "F1",
+    }
+    (run_dir / "pipeline_config.json").write_text(
+        json.dumps(cfg, indent=2) + "\n", encoding="utf-8"
+    )
+    # All pathogenic => single-class labeled subset.
+    rows = [
+        {
+            "clinical_significance_bucket": "Pathogenic",
+            "alphafold_confidence_score": 50.0,
+            "germline_date_last_evaluated": "2020-01-01",
+        }
+        for _ in range(60)
+    ]
+    pd.DataFrame(rows).to_csv(proc / "syn_missense_mappable.csv", index=False)
+
+    subprocess.check_call(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "evaluation_metrics.py"),
+            "--run-dir",
+            str(run_dir),
+            "--seed",
+            "0",
+        ],
+        cwd=str(ROOT),
+    )
+    out = proc / "evaluation_metrics.json"
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["status"] == "insufficient_class_balance"
+    assert doc["split_mode"] == "not_applicable_single_class"

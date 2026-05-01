@@ -6,6 +6,7 @@ __pycache__/
 runs/
 runs_smoke/
 runs_batch_smoke/
+runs_batch_eval_smoke/
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/

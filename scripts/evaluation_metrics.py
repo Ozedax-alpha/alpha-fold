@@ -184,10 +184,41 @@ def main() -> None:
         raise SystemExit(f"Too few path/benign rows for split: {len(sub)}")
 
     y = sub["clinical_significance_bucket"].isin(["Pathogenic", "Likely pathogenic"]).astype(int).to_numpy()
+    n_pos_all = int((y == 1).sum())
+    n_neg_all = int((y == 0).sum())
 
     n_dated = 0
     if "germline_date_last_evaluated" in sub.columns:
         n_dated = _count_parseable_eval_dates(sub["germline_date_last_evaluated"].tolist())
+
+    out_path = (
+        Path(args.out_json)
+        if args.out_json
+        else (missense_path.parent / "evaluation_metrics.json")
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # If there is no class balance at all (e.g., all Path/LP), write a clear
+    # report instead of bubbling NaNs through every metric.
+    if n_pos_all == 0 or n_neg_all == 0:
+        report: dict = {
+            "status": "insufficient_class_balance",
+            "split_mode": "not_applicable_single_class",
+            "n_train": 0,
+            "n_test": 0,
+            "split_metadata": {
+                "n_label_rows_path_vs_benign": int(len(sub)),
+                "n_pos_all": int(n_pos_all),
+                "n_neg_all": int(n_neg_all),
+                "n_rows_with_parseable_germline_date": int(n_dated),
+                "min_dated_rows_for_time_split": int(args.min_dated_rows),
+            },
+            "features": {},
+        }
+        out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"Wrote {out_path}")
+        print(json.dumps(report, indent=2))
+        return
 
     split_mode = "random_stratified"
     use_time = False
@@ -228,12 +259,22 @@ def main() -> None:
         raise SystemExit("No numeric feature columns found in missense CSV.")
 
     y_tr, y_te = y[train_idx], y[test_idx]
+    n_pos_tr = int((y_tr == 1).sum())
+    n_neg_tr = int((y_tr == 0).sum())
+    n_pos_te = int((y_te == 1).sum())
+    n_neg_te = int((y_te == 0).sum())
     report: dict = {
         "split_mode": split_mode,
         "n_train": int(len(train_idx)),
         "n_test": int(len(test_idx)),
         "split_metadata": {
             "n_label_rows_path_vs_benign": int(len(sub)),
+            "n_pos_all": int(n_pos_all),
+            "n_neg_all": int(n_neg_all),
+            "n_pos_train": int(n_pos_tr),
+            "n_neg_train": int(n_neg_tr),
+            "n_pos_test": int(n_pos_te),
+            "n_neg_test": int(n_neg_te),
             "n_rows_with_parseable_germline_date": int(n_dated),
             "min_dated_rows_for_time_split": int(args.min_dated_rows),
             "train_pathogenic_fraction": float(y_tr.mean()) if len(y_tr) else float("nan"),
@@ -255,12 +296,6 @@ def main() -> None:
             "roc_auc_test_score_higher_is_pathogenic": auc,
         }
 
-    out_path = (
-        Path(args.out_json)
-        if args.out_json
-        else (missense_path.parent / "evaluation_metrics.json")
-    )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"Wrote {out_path}")
     print(json.dumps(report, indent=2))

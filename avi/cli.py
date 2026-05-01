@@ -841,6 +841,28 @@ def cmd_batch(ns: argparse.Namespace) -> int:
             rc = _run_script("run_pipeline.py", extra, env=env)
             if rc == 0:
                 _write_run_manifest(run_dir=run_dir)
+                if getattr(ns, "report", False):
+                    try:
+                        _export_html_report(run_dir=run_dir, env=env, notebook_path=None)
+                    except Exception as e:
+                        rc = 1
+                        err = f"ReportError: {e}"
+                if rc == 0 and getattr(ns, "evaluate", False):
+                    try:
+                        ev_args = [
+                            "--run-dir",
+                            str(run_dir),
+                            "--seed",
+                            str(getattr(ns, "evaluate_seed", 42)),
+                            "--min-label-rows",
+                            str(getattr(ns, "evaluate_min_label_rows", 40)),
+                            "--min-dated-rows",
+                            str(getattr(ns, "evaluate_min_dated_rows", 50)),
+                        ]
+                        rc = _run_script("evaluation_metrics.py", ev_args, env=None)
+                    except Exception as e:
+                        rc = 1
+                        err = f"EvaluateError: {e}"
         except Exception as e:
             rc = 1
             err = f"{type(e).__name__}: {e}"
@@ -1122,6 +1144,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--continue-on-error",
         action="store_true",
         help="Continue remaining presets if one fails.",
+    )
+    p_batch.add_argument(
+        "--report",
+        action="store_true",
+        help="After each successful run, export an executed HTML report into <run-dir>/reports/.",
+    )
+    p_batch.add_argument(
+        "--evaluate",
+        action="store_true",
+        help="After each successful run, write evaluation_metrics.json into data/processed/.",
+    )
+    p_batch.add_argument(
+        "--evaluate-seed",
+        type=int,
+        default=42,
+        help="With --evaluate: stratified split RNG seed.",
+    )
+    p_batch.add_argument(
+        "--evaluate-min-label-rows",
+        type=int,
+        default=40,
+        metavar="N",
+        help="With --evaluate: minimum Path/LP + Ben/LB rows required.",
+    )
+    p_batch.add_argument(
+        "--evaluate-min-dated-rows",
+        type=int,
+        default=50,
+        metavar="N",
+        help="With --evaluate: minimum parseable germline_date_last_evaluated rows for time split.",
     )
     p_batch.set_defaults(func=cmd_batch)
 
