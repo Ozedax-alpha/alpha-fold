@@ -5,6 +5,9 @@ from __future__ import annotations
 import html
 import json
 import os
+import subprocess
+import sys
+import threading
 import socketserver
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -74,6 +77,15 @@ def _protein_card(p: Any) -> str:
     <div class="pill">updated {html.escape(str(p['updated_utc']))}</div>
   </div>
 </div>
+"""
+
+
+def _run_button(protein_id: int) -> str:
+    return f"""
+<form action="/run" method="post" style="margin-top:10px">
+  <input type="hidden" name="id" value="{int(protein_id)}"/>
+  <button type="submit">Run pipeline</button>
+</form>
 """
 
 
@@ -160,6 +172,7 @@ class Handler(BaseHTTPRequestHandler):
 <div class="card">
   <div class="h1">{html.escape(title)}</div>
   <div class="muted mono">UniProt: {html.escape(str(p['uniprot_id']))} · preset: {html.escape(str(p['preset_key'] or ''))}</div>
+  {_run_button(int(p['id']))}
 </div>
 """
             run_block = '<div class="card">No runs indexed for this protein.</div>'
@@ -206,7 +219,14 @@ class Handler(BaseHTTPRequestHandler):
             # Prevent arbitrary file reads: only allow under repo base_dir or under runs roots.
             base = self.base_dir.resolve()
             allowed = False
-            for root in (base / "runs", base / "runs_smoke", base / "runs_batch_smoke", base / "runs_batch_eval_smoke"):
+            for root in (
+                base / "runs",
+                base / "runs_smoke",
+                base / "runs_batch_smoke",
+                base / "runs_batch_eval_smoke",
+                base / "runs_dataset",
+                base / "runs_dataset_smoke",
+            ):
                 try:
                     if target.is_relative_to(root.resolve()):  # py3.9+? (we're 3.11+)
                         allowed = True
@@ -227,6 +247,52 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._send(404, _page("Not found", _topbar("") + '<div class="wrap"><div class="card">Not found.</div></div>'))
+
+    def do_POST(self) -> None:  # noqa: N802
+        u = urlparse(self.path)
+        if u.path != "/run":
+            self._send(404, _page("Not found", _topbar("") + '<div class="wrap"><div class="card">Not found.</div></div>'))
+            return
+
+        length = int(self.headers.get("Content-Length") or "0")
+        raw = self.rfile.read(length) if length > 0 else b""
+        form = parse_qs(raw.decode("utf-8", errors="ignore"))
+        pid_s = (form.get("id") or [""])[0]
+        try:
+            protein_id = int(pid_s)
+        except Exception:
+            self._send(400, _page("Bad request", _topbar("") + '<div class="wrap"><div class="card">Bad protein id.</div></div>'))
+            return
+
+        # Kick off a background run (no blocking the UI thread).
+        base = self.base_dir.resolve()
+        db_path = self.db_path.resolve()
+
+        def _bg() -> None:
+            cmd = [
+                sys.executable,
+                "-m",
+                "avi",
+                "dataset",
+                "run",
+                "--db",
+                str(db_path),
+                "--protein-ids",
+                str(protein_id),
+                "--runs-parent",
+                "runs_dataset",
+                "--report",
+                "--evaluate",
+                "--continue-on-error",
+            ]
+            subprocess.call(cmd, cwd=str(base))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+        # Redirect back to protein page.
+        self.send_response(303)
+        self.send_header("Location", f"/protein?id={protein_id}")
+        self.end_headers()
 
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: D401
         if os.environ.get("AVI_WEBUI_QUIET", "").strip() in ("1", "true", "yes"):

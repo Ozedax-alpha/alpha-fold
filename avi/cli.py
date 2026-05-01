@@ -1189,10 +1189,20 @@ def cmd_dataset_run(ns: argparse.Namespace) -> int:
         wanted_keys: list[str] | None = None
         if ns.presets:
             wanted_keys = [p.strip() for p in str(ns.presets).split(",") if p.strip()]
+        wanted_ids: set[int] | None = None
+        if getattr(ns, "protein_ids", None):
+            wanted_ids = set()
+            for t in str(ns.protein_ids).split(","):
+                t = t.strip()
+                if not t:
+                    continue
+                wanted_ids.add(int(t))
 
         rows = con.execute("SELECT * FROM proteins ORDER BY updated_utc DESC;").fetchall()
         selected = []
         for r in rows:
+            if wanted_ids is not None and int(r["id"]) not in wanted_ids:
+                continue
             if wanted_keys is not None:
                 pk = (r["preset_key"] or "").strip()
                 if pk not in wanted_keys:
@@ -1236,6 +1246,26 @@ def cmd_dataset_run(ns: argparse.Namespace) -> int:
             + "\n",
             encoding="utf-8",
         )
+
+        # Mark running early so UI can show progress.
+        try:
+            con = avi_db.connect(db_path)
+            try:
+                avi_db.init_db(con)
+                avi_db.upsert_run(
+                    con,
+                    run_dir=run_dir,
+                    protein_id=int(p["id"]),
+                    created_utc=None,
+                    status="running",
+                    report_html_path=None,
+                    evaluation_json_path=None,
+                    error=None,
+                )
+            finally:
+                con.close()
+        except Exception:
+            pass
 
         rc = 0
         err: str | None = None
@@ -1705,6 +1735,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--presets",
         default=None,
         help="Optional comma-separated preset_key filters (runs all proteins if omitted).",
+    )
+    p_ds_run.add_argument(
+        "--protein-ids",
+        default=None,
+        help="Optional comma-separated proteins.id values from avi.db (overrides --presets).",
     )
     p_ds_run.add_argument(
         "--limit",
