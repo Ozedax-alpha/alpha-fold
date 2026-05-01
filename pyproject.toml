@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alphafold-variant-interpretation"
+version = "0.1.0"
+description = "ClinVar + AlphaFold variant interpretation scaffold (TP53-first)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests",
+    "pandas",
+    "biopython",
+    "numpy",
+    "matplotlib",
+    "seaborn",
+    "jupyter",
+]
+
+[project.optional-dependencies]
+cache = ["requests-cache"]
+
+[project.scripts]
+avi = "avi.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["avi*"]
