@@ -20,6 +20,11 @@ pre-commit install
 pre-commit run --all-files
 ```
 
+This repo also includes a local notebook cleaner hook (`nb-clean`) that:
+
+- ensures every notebook cell has an `id` (required by newer `nbformat`)
+- strips execution counts and outputs to keep diffs reviewable
+
 ## Tests
 
 ```bash
