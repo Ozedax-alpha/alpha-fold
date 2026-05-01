@@ -23,6 +23,8 @@ py -3 -m avi clean --keep 20
 py -3 -m avi gc --delete-partial --older-than-days 7 --dry-run
 py -3 -m avi gc --delete-partial --older-than-days 7 --yes
 py -3 -m avi batch --presets tp53,insulin --continue-on-error
+py -3 -m avi batch --presets tp53,brca1,insulin --report --evaluate --continue-on-error
+py -3 -m avi batch --presets insulin --report --evaluate --evaluate-min-label-rows 30 --continue-on-error
 py -3 -m avi add-preset brca1 --from-uniprot P38398 --auto --overwrite
 py -3 -m avi batch --from-uniprot P04637,P38398 --continue-on-error
 ```
@@ -121,7 +123,12 @@ After `*_missense_mappable.csv` exists:
 py -3 -m avi evaluate --run-dir runs/tp53/<timestamp>
 ```
 
-Writes `data/processed/evaluation_metrics.json` with Cohen’s *d* (train) and a rank AUC (test) for each numeric feature, plus **`split_metadata`** (dated-row counts and train/test pathogenic fractions). Uses **time-based** holdout when enough rows have a parseable `germline_date_last_evaluated` and the chronological test fold still has both classes; otherwise a **stratified random** split. Tuning: `avi evaluate --run-dir ... --seed 42 --min-dated-rows 50`.
+Writes `data/processed/evaluation_metrics.json` with Cohen’s *d* (train) and a rank AUC (test) for each numeric feature, plus **`split_metadata`** (dated-row counts and class balance).
+
+- Uses **time-based** holdout when enough rows have a parseable `germline_date_last_evaluated` and the chronological test fold still has both classes; otherwise a **stratified random** split.
+- If the labeled subset is **single-class** (all Path/LP or all Ben/LB), evaluation writes `status: "insufficient_class_balance"` and skips metrics.
+
+Tuning: `avi evaluate --run-dir ... --seed 42 --min-dated-rows 50 --min-label-rows 40`.
 
 ## Notebook
 
